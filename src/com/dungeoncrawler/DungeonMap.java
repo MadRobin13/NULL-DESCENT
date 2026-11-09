@@ -93,9 +93,9 @@ public class DungeonMap {
                 carveCorridor(lastRoomCenterX, lastRoomCenterY, centerX, centerY);
                 
                 int roll = rand.nextInt(100);
-                if (roll < 35) interactables[centerY][centerX] = '$'; 
-                else if (roll < 65) interactables[centerY][centerX] = 'T'; 
-                else interactables[centerY][centerX] = '?';               
+                if (roll < 15) interactables[centerY][centerX] = '$';      // 15% chance for Data
+                else if (roll < 45) interactables[centerY][centerX] = 'T'; // 30% chance for Firewall Trap
+                else interactables[centerY][centerX] = '?';                // 55% chance for Mystery Cache
             }
 
             lastRoomCenterX = centerX;
@@ -106,7 +106,6 @@ public class DungeonMap {
         for (int b = 0; b < bugCount; b++) {
             if (!middleRooms.isEmpty()) {
                 int[] center = middleRooms.get(rand.nextInt(middleRooms.size()));
-                // Speed: 0.70 | Damage: 5 to 8
                 monsters.add(new Monster(center[0] + 1, center[1], 'B', "\033[38;5;196m", "Logic Bug", 0.70, 5, 8, 10 + (floorDepth * 2)));
             }
         }
@@ -115,7 +114,6 @@ public class DungeonMap {
         for (int t = 0; t < trojanCount; t++) {
             if (!middleRooms.isEmpty()) {
                 int[] center = middleRooms.get(rand.nextInt(middleRooms.size()));
-                // Speed: 0.45 | Damage: 15 to 25
                 monsters.add(new Monster(center[0] - 1, center[1], 'V', "\033[38;5;196m", "Trojan Virus", 0.45, 15, 25, 25 + (floorDepth * 3)));
             }
         }
@@ -183,12 +181,16 @@ public class DungeonMap {
                 player.takeDamage(35);
                 interactables[py][px] = ' '; 
             } else if (item == '?') {
-                if (rand.nextInt(100) < 30) {
-                    events.publishEvent("Question Mark Cache gave +5 HP bonus!", EventManager.EventType.LOOT);
-                    player.heal(5);
-                } else {
+                int chance = rand.nextInt(100);
+                if (chance < 50) {
+                    events.publishEvent("Question Mark Cache contained minor Data! (+25 Score).", EventManager.EventType.LOOT);
+                    player.addScore(25);
+                } else if (chance < 80) {
                     events.publishEvent("Question Mark Trap sprung! -5 HP damage.", EventManager.EventType.DAMAGE);
                     player.takeDamage(5);
+                } else {
+                    events.publishEvent("Question Mark Cache gave +5 HP bonus!", EventManager.EventType.LOOT);
+                    player.heal(5);
                 }
                 interactables[py][px] = ' ';
             } else if (item == 'H') {

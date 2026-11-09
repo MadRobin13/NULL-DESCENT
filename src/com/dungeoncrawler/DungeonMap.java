@@ -47,12 +47,23 @@ public class DungeonMap {
         int numRooms = rand.nextInt(4) + 6; 
         int lastRoomCenterX = 1;
         int lastRoomCenterY = 1;
+        
+        int firstRoomX = 0, firstRoomY = 0;
+        List<int[]> roomCenters = new ArrayList<>();
+        List<int[]> middleRooms = new ArrayList<>(); 
 
         for (int i = 0; i < numRooms; i++) {
             int roomWidth = rand.nextInt(7) + 4;
             int roomHeight = rand.nextInt(5) + 4;
             int roomX = rand.nextInt(width - roomWidth - 2) + 1;
             int roomY = rand.nextInt(height - roomHeight - 2) + 1;
+            
+            if (i == numRooms - 1) {
+                while (Math.abs(roomX - firstRoomX) < width / 3 && Math.abs(roomY - firstRoomY) < height / 3) {
+                    roomX = rand.nextInt(width - roomWidth - 2) + 1;
+                    roomY = rand.nextInt(height - roomHeight - 2) + 1;
+                }
+            }
 
             for (int y = roomY; y < roomY + roomHeight; y++) {
                 for (int x = roomX; x < roomX + roomWidth; x++) {
@@ -62,43 +73,68 @@ public class DungeonMap {
 
             int centerX = roomX + roomWidth / 2;
             int centerY = roomY + roomHeight / 2;
+            
+            if (i > 0) {
+                roomCenters.add(new int[]{centerX, centerY});
+                if (i < numRooms - 1) {
+                    middleRooms.add(new int[]{centerX, centerY}); 
+                }
+            }
 
             if (i == 0) {
+                firstRoomX = roomX;
+                firstRoomY = roomY;
                 this.startX = centerX;
                 this.startY = centerY;
                 if (hasUpStairs) {
                     interactables[centerY][centerX] = '<';
-                    itemRevealed[centerY][centerX] = true; 
                 }
             } else {
                 carveCorridor(lastRoomCenterX, lastRoomCenterY, centerX, centerY);
                 
                 int roll = rand.nextInt(100);
-                if (roll < 30) interactables[centerY][centerX] = '$'; 
-                else if (roll < 50) interactables[centerY][centerX] = 'T'; 
-                else if (roll < 70) interactables[centerY][centerX] = 'H'; 
-                
-                if (rand.nextInt(100) < (40 + floorDepth * 3)) {
-                    if (rand.nextBoolean()) {
-                        monsters.add(new Monster(centerX + 1, centerY, 'B', "\033[38;5;196m", "Logic Bug", 0.75, 3, 8, 20 + (floorDepth * 2)));
-                    } else {
-                        monsters.add(new Monster(centerX + 1, centerY, 'V', "\033[38;5;196m", "Trojan Virus", 0.45, 10, 20, 45 + (floorDepth * 5)));
-                    }
-                }
+                if (roll < 35) interactables[centerY][centerX] = '$'; 
+                else if (roll < 65) interactables[centerY][centerX] = 'T'; 
+                else interactables[centerY][centerX] = '?';               
             }
 
             lastRoomCenterX = centerX;
             lastRoomCenterY = centerY;
         }
 
+        int bugCount = rand.nextInt(3) + 1; 
+        for (int b = 0; b < bugCount; b++) {
+            if (!middleRooms.isEmpty()) {
+                int[] center = middleRooms.get(rand.nextInt(middleRooms.size()));
+                // Speed: 0.70 | Damage: 5 to 8
+                monsters.add(new Monster(center[0] + 1, center[1], 'B', "\033[38;5;196m", "Logic Bug", 0.70, 5, 8, 10 + (floorDepth * 2)));
+            }
+        }
+
+        int trojanCount = rand.nextInt(2) + 1; 
+        for (int t = 0; t < trojanCount; t++) {
+            if (!middleRooms.isEmpty()) {
+                int[] center = middleRooms.get(rand.nextInt(middleRooms.size()));
+                // Speed: 0.45 | Damage: 15 to 25
+                monsters.add(new Monster(center[0] - 1, center[1], 'V', "\033[38;5;196m", "Trojan Virus", 0.45, 15, 25, 25 + (floorDepth * 3)));
+            }
+        }
+
+        int healthPackCount = rand.nextInt(3); 
+        for (int h = 0; h < healthPackCount && !roomCenters.isEmpty(); h++) {
+            int index = rand.nextInt(roomCenters.size());
+            int[] center = roomCenters.remove(index);
+            interactables[center[1]][center[0]] = 'H';
+        }
+
         this.endX = lastRoomCenterX;
         this.endY = lastRoomCenterY;
         if (floorDepth >= 9) {
             interactables[lastRoomCenterY][lastRoomCenterX] = 'M';
+            monsters.add(new Monster(lastRoomCenterX - 1, lastRoomCenterY, 'O', "\033[38;5;201m", "System Overlord", 0.75, 15, 30, 100));
         } else {
             interactables[lastRoomCenterY][lastRoomCenterX] = '>';
         }
-        itemRevealed[lastRoomCenterY][lastRoomCenterX] = true; 
     }
 
     private void carveCorridor(int x1, int y1, int x2, int y2) {
@@ -138,19 +174,26 @@ public class DungeonMap {
         char item = interactables[py][px];
         
         if (item != ' ') {
-            itemRevealed[py][px] = true; 
-
             if (item == '$') {
                 events.publishEvent("Acquired Data Fragment (+100 Score).", EventManager.EventType.LOOT);
                 player.addScore(100);
                 interactables[py][px] = ' '; 
             } else if (item == 'T') {
-                events.publishEvent("Security Firewall triggered! Took 15 damage.", EventManager.EventType.DAMAGE);
-                player.takeDamage(15);
+                events.publishEvent("Red Firewall Trap triggered! Severe -35 HP damage.", EventManager.EventType.DAMAGE);
+                player.takeDamage(35);
                 interactables[py][px] = ' '; 
+            } else if (item == '?') {
+                if (rand.nextInt(100) < 30) {
+                    events.publishEvent("Question Mark Cache gave +5 HP bonus!", EventManager.EventType.LOOT);
+                    player.heal(5);
+                } else {
+                    events.publishEvent("Question Mark Trap sprung! -5 HP damage.", EventManager.EventType.DAMAGE);
+                    player.takeDamage(5);
+                }
+                interactables[py][px] = ' ';
             } else if (item == 'H') {
                 player.heal(25);
-                events.publishEvent("Found System Patch. Restored 25 HP.", EventManager.EventType.LOOT);
+                events.publishEvent("Found Rare Health Patch. Restored 25 HP.", EventManager.EventType.LOOT);
                 interactables[py][px] = ' '; 
             } else if (item == '>' || item == '<' || item == 'M') {
                 events.publishEvent("Terminal found. Press 'e' to interact.", EventManager.EventType.SYSTEM);
@@ -185,18 +228,15 @@ public class DungeonMap {
                     }
                     
                     if (interactables[y][x] != ' ') {
-                        if (!itemRevealed[y][x]) {
-                            renderer.drawChar(x + xOffset, y + yOffset, '?', "\033[38;5;207m"); 
-                        } else {
-                            String color = switch (interactables[y][x]) {
-                                case 'H' -> "\033[38;5;46m";  
-                                case 'T' -> "\033[38;5;196m"; 
-                                case '$' -> "\033[38;5;226m"; 
-                                case 'M' -> "\033[38;5;51m";
-                                default -> "\033[38;5;255m";  
-                            };
-                            renderer.drawChar(x + xOffset, y + yOffset, interactables[y][x], color);
-                        }
+                        String color = switch (interactables[y][x]) {
+                            case 'H' -> "\033[38;5;46m";  
+                            case 'T' -> "\033[38;5;196m"; 
+                            case '?' -> "\033[38;5;207m"; 
+                            case '$' -> "\033[38;5;226m"; 
+                            case 'M' -> "\033[38;5;51m";  
+                            default -> "\033[38;5;255m";  
+                        };
+                        renderer.drawChar(x + xOffset, y + yOffset, interactables[y][x], color);
                     }
                 }
             }

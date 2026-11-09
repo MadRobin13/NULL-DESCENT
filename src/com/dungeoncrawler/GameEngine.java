@@ -147,11 +147,13 @@ public class GameEngine {
         renderer.drawString(lX, mapStartY + 5,  "$ Data (Score)", "\033[38;5;226m");
         renderer.drawString(lX, mapStartY + 6,  "H Health Patch", "\033[38;5;46m");
         renderer.drawString(lX, mapStartY + 7,  "T Firewall Trap", "\033[38;5;196m");
-        renderer.drawString(lX, mapStartY + 8,  "B Logic Bug", "\033[38;5;196m");
-        renderer.drawString(lX, mapStartY + 9,  "  (Fast, Weak)", "\033[38;5;245m");
-        renderer.drawString(lX, mapStartY + 10, "V Trojan Virus", "\033[38;5;196m");
-        renderer.drawString(lX, mapStartY + 11, "  (Slow, Strong)", "\033[38;5;245m");
-        renderer.drawString(lX, mapStartY + 12, "? Unknown Tile", "\033[38;5;207m");
+        renderer.drawString(lX, mapStartY + 8,  "  (Inanimate, Fatal)", "\033[38;5;245m");
+        renderer.drawString(lX, mapStartY + 9,  "B Logic Bug", "\033[38;5;196m");
+        renderer.drawString(lX, mapStartY + 10, "  (Fast, Weak)", "\033[38;5;245m");
+        renderer.drawString(lX, mapStartY + 11, "V Trojan Virus", "\033[38;5;196m");
+        renderer.drawString(lX, mapStartY + 12, "  (Slow, Strong)", "\033[38;5;245m");
+        renderer.drawString(lX, mapStartY + 13, "O System Overlord", "\033[38;5;201m");
+        renderer.drawString(lX, mapStartY + 14, "? Unknown Tile", "\033[38;5;207m");
         
         int hudStartY = mapStartY + 20;
         
@@ -204,8 +206,10 @@ public class GameEngine {
         for (Monster m : map.getMonsters()) {
             if (Math.random() > m.getSpeed()) continue; 
             
-            if (Math.abs(m.getX() - hero.getX()) + Math.abs(m.getY() - hero.getY()) <= 8) {
-                if (Math.abs(m.getX() - hero.getX()) <= 1 && Math.abs(m.getY() - hero.getY()) <= 1) {
+            int distToHero = Math.abs(m.getX() - hero.getX()) + Math.abs(m.getY() - hero.getY());
+            
+            if (distToHero <= 8) {
+                if (distToHero == 1) {
                     int dmg = m.getMinDmg() + (int)(Math.random() * (m.getMaxDmg() - m.getMinDmg() + 1));
                     hero.takeDamage(dmg);
                     eventManager.publishEvent(m.getName() + " corrupted you for " + dmg + " dmg!", EventManager.EventType.DAMAGE);
@@ -220,11 +224,16 @@ public class GameEngine {
         char currentTile = getCurrentMap().getInteractableAt(hero.getX(), hero.getY());
         
         if (currentTile == 'M') { 
-            System.out.print("\033[2J\033[H");
-            System.out.println("\033[38;5;46mMAINFRAME HACKED. MISSION ACCOMPLISHED!\033[0m");
-            hero.addScore(5000); 
-            System.out.println("Final Score: " + hero.getScore());
-            isRunning = false;
+            boolean bossAlive = getCurrentMap().getMonsters().stream().anyMatch(m -> m.getSymbol() == 'O');
+            if (bossAlive) {
+                eventManager.publishEvent("ACCESS DENIED: System Overlord is still active!", EventManager.EventType.SYSTEM);
+            } else {
+                System.out.print("\033[2J\033[H");
+                System.out.println("\033[38;5;46mMAINFRAME HACKED. MISSION ACCOMPLISHED!\033[0m");
+                hero.addScore(5000); 
+                System.out.println("Final Score: " + hero.getScore());
+                isRunning = false;
+            }
             
         } else if (currentTile == '>') { 
             eventManager.publishEvent("Descending deeper into the subnet...", EventManager.EventType.SYSTEM);

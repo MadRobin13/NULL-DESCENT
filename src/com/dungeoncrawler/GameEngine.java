@@ -2,6 +2,7 @@ package com.dungeoncrawler;
 
 import com.dungeoncrawler.engine.TerminalRenderer;
 import com.dungeoncrawler.engine.EventManager;
+import com.dungeoncrawler.engine.MusicPlayer;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 import org.jline.utils.NonBlockingReader;
@@ -15,6 +16,7 @@ public class GameEngine {
     private final TerminalRenderer renderer;
     private final EventManager eventManager;
     private final Player hero;
+    private final MusicPlayer musicPlayer;
     
     private final List<DungeonMap> floors;
     private int currentFloorIndex; 
@@ -53,7 +55,10 @@ public class GameEngine {
         this.eventManager = new EventManager();
         this.hero = new Player(0, 0); 
         this.floors = new ArrayList<>();
+        this.musicPlayer = new MusicPlayer();
         this.isRunning = true;
+        
+        this.musicPlayer.playLoop("bgm.wav");
         
         initializeNewRun();
     }
@@ -89,6 +94,7 @@ public class GameEngine {
         } catch (IOException e) {
             System.err.println("Terminal init failed: " + e.getMessage());
         } finally {
+            musicPlayer.stop();
             System.out.print("\033[2J\033[H"); 
             System.out.println("Connection terminated. Final Score: " + hero.getScore());
         }

@@ -1,0 +1,2 @@
+javac -cp "lib/*" -d bin $(find src -name "*.java")                                                                                                                                                                20s 23:38:19
+java -cp "bin:lib/*" com.dungeoncrawler.Main

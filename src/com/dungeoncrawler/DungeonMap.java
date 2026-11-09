@@ -1,4 +1,5 @@
 package com.dungeoncrawler;
+
 import com.dungeoncrawler.engine.TerminalRenderer;
 import com.dungeoncrawler.engine.EventManager;
 import java.util.ArrayList;
@@ -17,7 +18,7 @@ public class DungeonMap {
     private int endX, endY;
     private final Random rand = new Random();
 
-    public DungeonMap(int width, int height, boolean hasUpStairs) {
+    public DungeonMap(int width, int height, boolean hasUpStairs, int floorDepth) {
         this.width = width;
         this.height = height;
         this.explored = new boolean[height][width];
@@ -26,7 +27,7 @@ public class DungeonMap {
         this.itemRevealed = new boolean[height][width];
         this.monsters = new ArrayList<>();
         
-        generateRandomMap(hasUpStairs);
+        generateRandomMap(hasUpStairs, floorDepth);
     }
 
     public int getStartX() { return startX; }
@@ -34,7 +35,7 @@ public class DungeonMap {
     public int getEndX() { return endX; }
     public int getEndY() { return endY; }
 
-    private void generateRandomMap(boolean hasUpStairs) {
+    private void generateRandomMap(boolean hasUpStairs, int floorDepth) {
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 terrain[y][x] = TerminalRenderer.WALL_SOLID;
@@ -77,12 +78,11 @@ public class DungeonMap {
                 else if (roll < 50) interactables[centerY][centerX] = 'T'; 
                 else if (roll < 70) interactables[centerY][centerX] = 'H'; 
                 
-                // Spawn Monster with unique stats
-                if (rand.nextInt(100) < 40) {
+                if (rand.nextInt(100) < (40 + floorDepth * 3)) {
                     if (rand.nextBoolean()) {
-                        monsters.add(new Monster(centerX + 1, centerY, 'B', "Logic Bug", 20, 3, 8, 0.75));
+                        monsters.add(new Monster(centerX + 1, centerY, 'B', "\033[38;5;196m", "Logic Bug", 0.75, 3, 8, 20 + (floorDepth * 2)));
                     } else {
-                        monsters.add(new Monster(centerX + 1, centerY, 'V', "Trojan Virus", 45, 10, 20, 0.45));
+                        monsters.add(new Monster(centerX + 1, centerY, 'V', "\033[38;5;196m", "Trojan Virus", 0.45, 10, 20, 45 + (floorDepth * 5)));
                     }
                 }
             }
@@ -93,7 +93,11 @@ public class DungeonMap {
 
         this.endX = lastRoomCenterX;
         this.endY = lastRoomCenterY;
-        interactables[lastRoomCenterY][lastRoomCenterX] = '>';
+        if (floorDepth >= 9) {
+            interactables[lastRoomCenterY][lastRoomCenterX] = 'M';
+        } else {
+            interactables[lastRoomCenterY][lastRoomCenterX] = '>';
+        }
         itemRevealed[lastRoomCenterY][lastRoomCenterX] = true; 
     }
 
@@ -141,15 +145,15 @@ public class DungeonMap {
                 player.addScore(100);
                 interactables[py][px] = ' '; 
             } else if (item == 'T') {
-                events.publishEvent("Security Firewall triggered! -15 HP.", EventManager.EventType.DAMAGE);
+                events.publishEvent("Security Firewall triggered! Took 15 damage.", EventManager.EventType.DAMAGE);
                 player.takeDamage(15);
                 interactables[py][px] = ' '; 
             } else if (item == 'H') {
-                events.publishEvent("Found System Patch. Restored 25 HP.", EventManager.EventType.LOOT);
                 player.heal(25);
+                events.publishEvent("Found System Patch. Restored 25 HP.", EventManager.EventType.LOOT);
                 interactables[py][px] = ' '; 
-            } else if (item == '>' || item == '<') {
-                events.publishEvent("Staircase found. Press 'e' to use.", EventManager.EventType.SYSTEM);
+            } else if (item == '>' || item == '<' || item == 'M') {
+                events.publishEvent("Terminal found. Press 'e' to interact.", EventManager.EventType.SYSTEM);
             }
         }
     }
@@ -168,25 +172,30 @@ public class DungeonMap {
         }
     }
 
-    public void drawToBuffer(TerminalRenderer renderer) {
+    public void drawToBuffer(TerminalRenderer renderer, int xOffset, int yOffset) {
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 if (!explored[y][x]) {
-                    renderer.drawChar(x, y, TerminalRenderer.FOG_HEAVY);
+                    renderer.drawChar(x + xOffset, y + yOffset, TerminalRenderer.FOG_HEAVY, "\033[38;5;236m");
                 } else {
-                    renderer.drawChar(x, y, terrain[y][x], "\033[38;5;240m"); 
+                    if (terrain[y][x] == TerminalRenderer.WALL_SOLID) {
+                        renderer.drawChar(x + xOffset, y + yOffset, TerminalRenderer.WALL_SOLID, "\033[38;5;244m");
+                    } else {
+                        renderer.drawChar(x + xOffset, y + yOffset, TerminalRenderer.FLOOR_LIT, "\033[38;5;239m");
+                    }
                     
                     if (interactables[y][x] != ' ') {
                         if (!itemRevealed[y][x]) {
-                            renderer.drawChar(x, y, '?', "\033[38;5;207m"); 
+                            renderer.drawChar(x + xOffset, y + yOffset, '?', "\033[38;5;207m"); 
                         } else {
                             String color = switch (interactables[y][x]) {
                                 case 'H' -> "\033[38;5;46m";  
                                 case 'T' -> "\033[38;5;196m"; 
                                 case '$' -> "\033[38;5;226m"; 
+                                case 'M' -> "\033[38;5;51m";
                                 default -> "\033[38;5;255m";  
                             };
-                            renderer.drawChar(x, y, interactables[y][x], color);
+                            renderer.drawChar(x + xOffset, y + yOffset, interactables[y][x], color);
                         }
                     }
                 }
@@ -195,7 +204,7 @@ public class DungeonMap {
 
         for (Monster m : monsters) {
             if (explored[m.getY()][m.getX()]) {
-                renderer.drawChar(m.getX(), m.getY(), m.getSymbol(), "\033[38;5;196m");
+                renderer.drawChar(m.getX() + xOffset, m.getY() + yOffset, m.getSymbol(), m.getColor());
             }
         }
     }

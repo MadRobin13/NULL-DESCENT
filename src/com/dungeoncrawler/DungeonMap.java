@@ -3,6 +3,7 @@ package com.dungeoncrawler;
 import com.dungeoncrawler.engine.TerminalRenderer;
 import com.dungeoncrawler.engine.EventManager;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
@@ -16,10 +17,15 @@ public class DungeonMap {
     
     private int startX, startY;
     private int endX, endY;
-    private final Random rand = new Random();
+    private final Random rand;
 
-    // Standard constructor for new floors
+    // Standard constructor for new floors (randomized)
     public DungeonMap(int width, int height, boolean hasUpStairs, int floorDepth) {
+        this(width, height, hasUpStairs, floorDepth, new Random().nextLong());
+    }
+    
+    // Deterministic constructor for repeatable testing
+    public DungeonMap(int width, int height, boolean hasUpStairs, int floorDepth, long seed) {
         this.width = width;
         this.height = height;
         this.explored = new boolean[height][width];
@@ -27,6 +33,7 @@ public class DungeonMap {
         this.terrain = new char[height][width];
         this.interactables = new char[height][width];
         this.monsters = new ArrayList<>();
+        this.rand = new Random(seed);
         
         generateRandomMap(hasUpStairs, floorDepth);
     }
@@ -44,7 +51,8 @@ public class DungeonMap {
         this.interactables = interactables;
         this.explored = explored;
         this.monsters = monsters;
-        this.visible = new boolean[height][width]; // Visibility is always rebuilt dynamically
+        this.visible = new boolean[height][width];
+        this.rand = new Random(); // Resumed states do not need to preserve procedural seed
     }
 
     // --- Getters for FileManager Serialization ---
@@ -70,21 +78,22 @@ public class DungeonMap {
         int numRooms = rand.nextInt(4) + 6; 
         int lastRoomCenterX = 1;
         int lastRoomCenterY = 1;
-        
         int firstRoomX = 0, firstRoomY = 0;
-        List<int[]> roomCenters = new ArrayList<>();
-        List<int[]> middleRooms = new ArrayList<>(); 
 
+        // 1. Generate Rooms and Corridors
         for (int i = 0; i < numRooms; i++) {
             int roomWidth = rand.nextInt(7) + 4;
             int roomHeight = rand.nextInt(5) + 4;
             int roomX = rand.nextInt(width - roomWidth - 2) + 1;
             int roomY = rand.nextInt(height - roomHeight - 2) + 1;
             
+            // Fix unbounded loop risk by capping attempts
             if (i == numRooms - 1) {
-                while (Math.abs(roomX - firstRoomX) < width / 3 && Math.abs(roomY - firstRoomY) < height / 3) {
+                int attempts = 0;
+                while (attempts < 50 && Math.abs(roomX - firstRoomX) < width / 3 && Math.abs(roomY - firstRoomY) < height / 3) {
                     roomX = rand.nextInt(width - roomWidth - 2) + 1;
                     roomY = rand.nextInt(height - roomHeight - 2) + 1;
+                    attempts++;
                 }
             }
 
@@ -96,66 +105,102 @@ public class DungeonMap {
 
             int centerX = roomX + roomWidth / 2;
             int centerY = roomY + roomHeight / 2;
-            
-            if (i > 0) {
-                roomCenters.add(new int[]{centerX, centerY});
-                if (i < numRooms - 1) {
-                    middleRooms.add(new int[]{centerX, centerY}); 
-                }
-            }
 
             if (i == 0) {
                 firstRoomX = roomX;
                 firstRoomY = roomY;
                 this.startX = centerX;
                 this.startY = centerY;
-                if (hasUpStairs) {
-                    interactables[centerY][centerX] = '<';
-                }
             } else {
                 carveCorridor(lastRoomCenterX, lastRoomCenterY, centerX, centerY);
-                
-                int roll = rand.nextInt(100);
-                if (roll < 15) interactables[centerY][centerX] = '$';      
-                else if (roll < 40) interactables[centerY][centerX] = 'T'; 
-                else if (roll < 55) interactables[centerY][centerX] = 'F'; 
-                else interactables[centerY][centerX] = '?';                
             }
 
             lastRoomCenterX = centerX;
             lastRoomCenterY = centerY;
         }
 
-        int bugCount = rand.nextInt(3) + 1; 
-        for (int b = 0; b < bugCount; b++) {
-            if (!middleRooms.isEmpty()) {
-                int[] center = middleRooms.get(rand.nextInt(middleRooms.size()));
-                monsters.add(new Monster(center[0] + 1, center[1], 'B', "\033[38;5;196m", "Logic Bug", 0.70, 5, 8, 10 + (floorDepth * 2)));
+        this.endX = lastRoomCenterX;
+        this.endY = lastRoomCenterY;
+
+        // 2. Place structural interactables (Stairs/Mainframe)
+        if (hasUpStairs) {
+            interactables[this.startY][this.startX] = '<';
+        }
+        
+        if (floorDepth >= 9) {
+            interactables[this.endY][this.endX] = 'M';
+        } else {
+            interactables[this.endY][this.endX] = '>';
+        }
+
+        // 3. Collect all free, walkable coordinates to prevent overlap
+        List<int[]> freeCoords = new ArrayList<>();
+        for (int y = 1; y < height - 1; y++) {
+            for (int x = 1; x < width - 1; x++) {
+                if (terrain[y][x] == TerminalRenderer.FLOOR_LIT && interactables[y][x] == ' ') {
+                    // Strictly protect start and end tiles
+                    if ((x == this.startX && y == this.startY) || (x == this.endX && y == this.endY)) continue;
+                    freeCoords.add(new int[]{x, y});
+                }
             }
         }
 
-        int trojanCount = rand.nextInt(2) + 1; 
-        for (int t = 0; t < trojanCount; t++) {
-            if (!middleRooms.isEmpty()) {
-                int[] center = middleRooms.get(rand.nextInt(middleRooms.size()));
-                monsters.add(new Monster(center[0] - 1, center[1], 'V', "\033[38;5;196m", "Trojan Virus", 0.45, 15, 25, 25 + (floorDepth * 3)));
-            }
+        Collections.shuffle(freeCoords, rand);
+
+        // 4. Place items and traps (maintaining original density)
+        int itemsToSpawn = Math.max(0, numRooms - 2);
+        for (int i = 0; i < itemsToSpawn && !freeCoords.isEmpty(); i++) {
+            int[] coord = freeCoords.remove(freeCoords.size() - 1);
+            int roll = rand.nextInt(100);
+            if (roll < 15) interactables[coord[1]][coord[0]] = '$';      
+            else if (roll < 40) interactables[coord[1]][coord[0]] = 'T'; 
+            else if (roll < 55) interactables[coord[1]][coord[0]] = 'F'; 
+            else interactables[coord[1]][coord[0]] = '?';                
         }
 
         int healthPackCount = rand.nextInt(3); 
-        for (int h = 0; h < healthPackCount && !roomCenters.isEmpty(); h++) {
-            int index = rand.nextInt(roomCenters.size());
-            int[] center = roomCenters.remove(index);
-            interactables[center[1]][center[0]] = 'H';
+        for (int h = 0; h < healthPackCount && !freeCoords.isEmpty(); h++) {
+            int[] coord = freeCoords.remove(freeCoords.size() - 1);
+            interactables[coord[1]][coord[0]] = 'H';
         }
 
-        this.endX = lastRoomCenterX;
-        this.endY = lastRoomCenterY;
+        // 5. Place Monsters
+        int bugCount = rand.nextInt(3) + 1; 
+        for (int b = 0; b < bugCount && !freeCoords.isEmpty(); b++) {
+            int[] coord = freeCoords.remove(freeCoords.size() - 1);
+            monsters.add(new Monster(coord[0], coord[1], 'B', "\033[38;5;196m", "Logic Bug", 0.70, 5, 8, 10 + (floorDepth * 2)));
+        }
+
+        int trojanCount = rand.nextInt(2) + 1; 
+        for (int t = 0; t < trojanCount && !freeCoords.isEmpty(); t++) {
+            int[] coord = freeCoords.remove(freeCoords.size() - 1);
+            monsters.add(new Monster(coord[0], coord[1], 'V', "\033[38;5;196m", "Trojan Virus", 0.45, 15, 25, 25 + (floorDepth * 3)));
+        }
+
+        // Place System Overlord
         if (floorDepth >= 9) {
-            interactables[lastRoomCenterY][lastRoomCenterX] = 'M';
-            monsters.add(new Monster(lastRoomCenterX - 1, lastRoomCenterY, 'O', "\033[38;5;201m", "System Overlord", 0.75, 15, 30, 100));
-        } else {
-            interactables[lastRoomCenterY][lastRoomCenterX] = '>';
+            boolean placedOverlord = false;
+            int[][] adjacent = { {0,1}, {1,0}, {0,-1}, {-1,0}, {1,1}, {-1,-1}, {1,-1}, {-1,1} };
+            
+            // Prefer placing boss directly adjacent to mainframe
+            for (int[] offset : adjacent) {
+                int ox = this.endX + offset[0];
+                int oy = this.endY + offset[1];
+                if (isWalkable(ox, oy) && interactables[oy][ox] == ' ' && !hasMonsterAt(ox, oy) && !(ox == startX && oy == startY)) {
+                    monsters.add(new Monster(ox, oy, 'O', "\033[38;5;201m", "System Overlord", 0.75, 15, 30, 100));
+                    final int fox = ox;
+                    final int foy = oy;
+                    freeCoords.removeIf(c -> c[0] == fox && c[1] == foy);
+                    placedOverlord = true;
+                    break;
+                }
+            }
+            
+            // Fallback to random free coordinate if blocked
+            if (!placedOverlord && !freeCoords.isEmpty()) {
+                int[] coord = freeCoords.remove(freeCoords.size() - 1);
+                monsters.add(new Monster(coord[0], coord[1], 'O', "\033[38;5;201m", "System Overlord", 0.75, 15, 30, 100));
+            }
         }
     }
 
@@ -332,3 +377,4 @@ public class DungeonMap {
         }
     }
 }
+

@@ -9,38 +9,61 @@ import java.util.Random;
 public class DungeonMap {
     private final int width, height;
     private final boolean[][] explored;
+    private final boolean[][] visible; 
     private final char[][] terrain;
     private final char[][] interactables;
-    private final boolean[][] itemRevealed; 
     private final List<Monster> monsters;
     
     private int startX, startY;
     private int endX, endY;
     private final Random rand = new Random();
 
+    // Standard constructor for new floors
     public DungeonMap(int width, int height, boolean hasUpStairs, int floorDepth) {
         this.width = width;
         this.height = height;
         this.explored = new boolean[height][width];
+        this.visible = new boolean[height][width];
         this.terrain = new char[height][width];
         this.interactables = new char[height][width];
-        this.itemRevealed = new boolean[height][width];
         this.monsters = new ArrayList<>();
         
         generateRandomMap(hasUpStairs, floorDepth);
     }
 
+    // Restoration constructor for loading saved floors
+    public DungeonMap(int width, int height, int startX, int startY, int endX, int endY, 
+                      char[][] terrain, char[][] interactables, boolean[][] explored, List<Monster> monsters) {
+        this.width = width;
+        this.height = height;
+        this.startX = startX;
+        this.startY = startY;
+        this.endX = endX;
+        this.endY = endY;
+        this.terrain = terrain;
+        this.interactables = interactables;
+        this.explored = explored;
+        this.monsters = monsters;
+        this.visible = new boolean[height][width]; // Visibility is always rebuilt dynamically
+    }
+
+    // --- Getters for FileManager Serialization ---
+    public int getWidth() { return width; }
+    public int getHeight() { return height; }
     public int getStartX() { return startX; }
     public int getStartY() { return startY; }
     public int getEndX() { return endX; }
     public int getEndY() { return endY; }
+    public char[][] getTerrain() { return terrain; }
+    public char[][] getInteractables() { return interactables; }
+    public boolean[][] getExplored() { return explored; }
+    public List<Monster> getMonsters() { return monsters; }
 
     private void generateRandomMap(boolean hasUpStairs, int floorDepth) {
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 terrain[y][x] = TerminalRenderer.WALL_SOLID;
                 interactables[y][x] = ' '; 
-                itemRevealed[y][x] = false;
             }
         }
 
@@ -93,9 +116,10 @@ public class DungeonMap {
                 carveCorridor(lastRoomCenterX, lastRoomCenterY, centerX, centerY);
                 
                 int roll = rand.nextInt(100);
-                if (roll < 15) interactables[centerY][centerX] = '$';      // 15% chance for Data
-                else if (roll < 45) interactables[centerY][centerX] = 'T'; // 30% chance for Firewall Trap
-                else interactables[centerY][centerX] = '?';                // 55% chance for Mystery Cache
+                if (roll < 15) interactables[centerY][centerX] = '$';      
+                else if (roll < 40) interactables[centerY][centerX] = 'T'; 
+                else if (roll < 55) interactables[centerY][centerX] = 'F'; 
+                else interactables[centerY][centerX] = '?';                
             }
 
             lastRoomCenterX = centerX;
@@ -160,8 +184,6 @@ public class DungeonMap {
         monsters.remove(m);
     }
 
-    public List<Monster> getMonsters() { return monsters; }
-
     public char getInteractableAt(int x, int y) {
         return interactables[y][x];
     }
@@ -175,22 +197,32 @@ public class DungeonMap {
             if (item == '$') {
                 events.publishEvent("Acquired Data Fragment (+100 Score).", EventManager.EventType.LOOT);
                 player.addScore(100);
+                player.addItem(new Item("Data Fragment", 100));
                 interactables[py][px] = ' '; 
+            } else if (item == 'F') {
+                events.publishEvent("Found Firewall Patch! Use in inventory to block a trap.", EventManager.EventType.LOOT);
+                player.addItem(new Item("Firewall Patch", 50));
+                interactables[py][px] = ' ';
             } else if (item == 'T') {
-                events.publishEvent("Red Firewall Trap triggered! Severe -35 HP damage.", EventManager.EventType.DAMAGE);
-                player.takeDamage(35);
+                if (player.isFirewallPatchActive()) {
+                    events.publishEvent("Firewall Patch activated! Trap was nullified.", EventManager.EventType.SYSTEM);
+                    player.setFirewallPatchActive(false);
+                } else {
+                    events.publishEvent("Red Firewall Trap triggered! Severe -35 HP damage.", EventManager.EventType.DAMAGE);
+                    player.takeDamage(35);
+                }
                 interactables[py][px] = ' '; 
             } else if (item == '?') {
                 int chance = rand.nextInt(100);
-                if (chance < 50) {
-                    events.publishEvent("Question Mark Cache contained minor Data! (+25 Score).", EventManager.EventType.LOOT);
-                    player.addScore(25);
-                } else if (chance < 80) {
+                if (chance < 33) {
+                    events.publishEvent("Question Mark contained a Corrupted Cache.", EventManager.EventType.LOOT);
+                    player.addItem(new Item("Corrupted Cache", 25));
+                } else if (chance < 66) {
                     events.publishEvent("Question Mark Trap sprung! -5 HP damage.", EventManager.EventType.DAMAGE);
                     player.takeDamage(5);
                 } else {
-                    events.publishEvent("Question Mark Cache gave +5 HP bonus!", EventManager.EventType.LOOT);
-                    player.heal(5);
+                    events.publishEvent("Question Mark contained a Health Syringe.", EventManager.EventType.LOOT);
+                    player.addItem(new Item("Health Syringe", 5));
                 }
                 interactables[py][px] = ' ';
             } else if (item == 'H') {
@@ -204,17 +236,62 @@ public class DungeonMap {
     }
 
     public void calculateFOV(int playerX, int playerY, int radius) {
-        for (int y = -radius; y <= radius; y++) {
-            for (int x = -radius; x <= radius; x++) {
-                if (x * x + y * y <= radius * radius) {
-                    int checkX = playerX + x;
-                    int checkY = playerY + y;
-                    if (checkX >= 0 && checkX < width && checkY >= 0 && checkY < height) {
-                        explored[checkY][checkX] = true;
-                    }
-                }
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                visible[y][x] = false;
             }
         }
+
+        if (radius < 0 || playerX < 0 || playerX >= width || playerY < 0 || playerY >= height) return;
+
+        for (int dy = -radius; dy <= radius; dy++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                if (dx * dx + dy * dy > radius * radius) continue;
+
+                int targetX = playerX + dx;
+                int targetY = playerY + dy;
+                if (targetX < 0 || targetX >= width || targetY < 0 || targetY >= height) continue;
+
+                int deltaX = Math.abs(dx);
+                int deltaY = Math.abs(dy);
+                traceRayRecursive(playerX, playerY, targetX, targetY,
+                        deltaX, deltaY, Integer.compare(targetX, playerX),
+                        Integer.compare(targetY, playerY), deltaX - deltaY);
+            }
+        }
+    }
+
+    private void traceRayRecursive(int x, int y, int targetX, int targetY, int deltaX, int deltaY, int stepX, int stepY, int error) {
+        visible[y][x] = true;
+        explored[y][x] = true;
+
+        if (terrain[y][x] == TerminalRenderer.WALL_SOLID || (x == targetX && y == targetY)) return;
+
+        int twiceError = 2 * error;
+        int nextX = x;
+        int nextY = y;
+        int nextError = error;
+
+        if (twiceError > -deltaY) {
+            nextError -= deltaY;
+            nextX += stepX;
+        }
+        if (twiceError < deltaX) {
+            nextError += deltaX;
+            nextY += stepY;
+        }
+
+        if (nextX != x && nextY != y && terrain[y][nextX] == TerminalRenderer.WALL_SOLID && terrain[nextY][x] == TerminalRenderer.WALL_SOLID) return;
+
+        traceRayRecursive(nextX, nextY, targetX, targetY, deltaX, deltaY, stepX, stepY, nextError);
+    }
+
+    public boolean isVisible(int x, int y) {
+        return x >= 0 && x < width && y >= 0 && y < height && visible[y][x];
+    }
+
+    public boolean isExplored(int x, int y) {
+        return x >= 0 && x < width && y >= 0 && y < height && explored[y][x];
     }
 
     public void drawToBuffer(TerminalRenderer renderer, int xOffset, int yOffset) {
@@ -224,9 +301,11 @@ public class DungeonMap {
                     renderer.drawChar(x + xOffset, y + yOffset, TerminalRenderer.FOG_HEAVY, "\033[38;5;236m");
                 } else {
                     if (terrain[y][x] == TerminalRenderer.WALL_SOLID) {
-                        renderer.drawChar(x + xOffset, y + yOffset, TerminalRenderer.WALL_SOLID, "\033[38;5;244m");
+                        renderer.drawChar(x + xOffset, y + yOffset, TerminalRenderer.WALL_SOLID,
+                                visible[y][x] ? "\033[38;5;244m" : "\033[38;5;238m");
                     } else {
-                        renderer.drawChar(x + xOffset, y + yOffset, TerminalRenderer.FLOOR_LIT, "\033[38;5;239m");
+                        renderer.drawChar(x + xOffset, y + yOffset, TerminalRenderer.FLOOR_LIT,
+                                visible[y][x] ? "\033[38;5;239m" : "\033[38;5;236m");
                     }
                     
                     if (interactables[y][x] != ' ') {
@@ -236,16 +315,18 @@ public class DungeonMap {
                             case '?' -> "\033[38;5;207m"; 
                             case '$' -> "\033[38;5;226m"; 
                             case 'M' -> "\033[38;5;51m";  
+                            case 'F' -> "\033[38;5;51m";  
                             default -> "\033[38;5;255m";  
                         };
-                        renderer.drawChar(x + xOffset, y + yOffset, interactables[y][x], color);
+                        renderer.drawChar(x + xOffset, y + yOffset, interactables[y][x],
+                                visible[y][x] ? color : "\033[38;5;238m");
                     }
                 }
             }
         }
 
         for (Monster m : monsters) {
-            if (explored[m.getY()][m.getX()]) {
+            if (isVisible(m.getX(), m.getY())) {
                 renderer.drawChar(m.getX() + xOffset, m.getY() + yOffset, m.getSymbol(), m.getColor());
             }
         }

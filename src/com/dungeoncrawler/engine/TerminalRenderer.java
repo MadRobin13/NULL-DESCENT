@@ -5,7 +5,7 @@ public class TerminalRenderer {
     public static final char FOG_HEAVY  = '\u2593';
     public static final char SHADOW     = '\u2592';
     public static final char FLOOR_LIT  = '\u2591';
-    
+
     public static final String RESET = "\033[0m";
     private static final String COLOR_WALL = "\033[38;5;240m";
     private static final String COLOR_HERO = "\033[38;5;214m";
@@ -20,6 +20,7 @@ public class TerminalRenderer {
         this.height = height;
         this.screenBuffer = new char[height][width];
         this.colorBuffer = new String[height][width];
+        clearBuffer();
     }
 
     public void clearBuffer() {
@@ -34,7 +35,7 @@ public class TerminalRenderer {
     public void drawChar(int x, int y, char c, String colorCode) {
         if (x >= 0 && x < width && y >= 0 && y < height) {
             screenBuffer[y][x] = c;
-            colorBuffer[y][x] = colorCode;
+            colorBuffer[y][x] = colorCode == null ? RESET : colorCode;
         }
     }
 
@@ -51,16 +52,38 @@ public class TerminalRenderer {
         }
     }
 
+    /**
+     * Draw each row at an absolute cursor position, so writing the last screen
+     * cell cannot scroll the terminal. Wrapping is disabled only while this
+     * frame is printed and restored afterward.
+     */
     public void render() {
-        StringBuilder frame = new StringBuilder();
-        frame.append("\033[H"); 
-        
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                frame.append(colorBuffer[y][x]).append(screenBuffer[y][x]);
-            }
-            frame.append(RESET).append("\n");
-        }
-        System.out.print(frame.toString());
+        System.out.print(buildFrame());
     }
+
+    // Package-private for headless rendering tests.
+    String buildFrame() {
+        StringBuilder frame = new StringBuilder(width * height + 512);
+        frame.append("\033[?7l"); // Disable automatic line wrapping for full-width rows.
+        String currentColor = RESET;
+
+        for (int y = 0; y < height; y++) {
+            frame.append("\033[").append(y + 1).append(";1H");
+            for (int x = 0; x < width; x++) {
+                String targetColor = colorBuffer[y][x];
+                if (!targetColor.equals(currentColor)) {
+                    frame.append(targetColor);
+                    currentColor = targetColor;
+                }
+                frame.append(screenBuffer[y][x]);
+            }
+        }
+
+        frame.append(RESET).append("\033[?7h");
+        return frame.toString();
+    }
+
+    // Package-private to allow tests to inspect the buffer without a terminal.
+    char getCharAt(int x, int y) { return screenBuffer[y][x]; }
+    String getColorAt(int x, int y) { return colorBuffer[y][x]; }
 }

@@ -119,25 +119,69 @@ public class GameEngine {
             terminal.enterRawMode();
             NonBlockingReader reader = terminal.reader();
 
-            System.out.print("\033[2J");
+            System.out.print("\033[2J\033[?25l"); // Clear screen and hide the cursor.
+            System.out.flush();
 
+            // Redraw on input or resize, not continuously during idle time.
+            int previousWidth = -1;
+            int previousHeight = -1;
+            boolean redraw = true;
             while (isRunning) {
-                updateLogic();
-                renderFrame();
-
-                int readChar = reader.read();
-                if (readChar != -1) {
-                    processInput((char) readChar);
+                int currentWidth = terminal.getWidth();
+                int currentHeight = terminal.getHeight();
+                if (redraw || currentWidth != previousWidth || currentHeight != previousHeight) {
+                    updateLogic();
+                    renderFrame();
+                    previousWidth = currentWidth;
+                    previousHeight = currentHeight;
+                    redraw = false;
                 }
+
+                int readChar = reader.read(250);
+                if (readChar == NonBlockingReader.READ_EXPIRED) continue;
+                if (readChar == NonBlockingReader.EOF) break;
+
+                char command = (char) readChar;
+                if (terminalTooSmall(currentWidth, currentHeight)
+                        && Character.toLowerCase(command) != 'q') {
+                    // Ignore movement and other inputs while the full display cannot fit.
+                    continue;
+                }
+                processInput(command);
+                redraw = true;
             }
         } catch (IOException e) {
             System.err.println("Terminal init failed: " + e.getMessage());
         } finally {
             activeTerminal = null;
             if (!testMode) musicPlayer.close();
-            System.out.print("\033[2J\033[H");
+            System.out.print("\033[0m\033[?7h\033[?25h\033[2J\033[H");
             System.out.println("Connection terminated. Final Score: " + hero.getScore());
+            System.out.flush();
         }
+    }
+
+    static boolean terminalTooSmall(int width, int height) {
+        return width < 100 || height < 55;
+    }
+
+    private void renderResizeWarning(int width, int height) {
+        // Respect even very narrow terminal widths; don't wrap the warning itself.
+        int usableWidth = Math.max(1, width - 1);
+        int availableRows = Math.max(1, height);
+        String[] lines = {
+            "NULL//DESCENT - TERMINAL TOO SMALL",
+            "Requires at least 100 columns x 55 rows.",
+            "Current size: " + width + " x " + height,
+            "Resize the terminal to continue. Q to quit."
+        };
+        StringBuilder message = new StringBuilder("\033[0m\033[2J\033[H");
+        for (int i = 0; i < Math.min(lines.length, availableRows); i++) {
+            message.append("\033[").append(i + 1).append(";1H");
+            message.append(lines[i], 0, Math.min(usableWidth, lines[i].length()));
+        }
+        System.out.print(message);
+        System.out.flush();
     }
 
     private DungeonMap getCurrentMap() {
@@ -163,6 +207,14 @@ public class GameEngine {
 
     // Package-private to verify overlays without starting JLine.
     void renderFrame() {
+        if (activeTerminal != null && !testMode) {
+            int width = activeTerminal.getWidth();
+            int height = activeTerminal.getHeight();
+            if (terminalTooSmall(width, height)) {
+                renderResizeWarning(width, height);
+                return;
+            }
+        }
         renderer.clearBuffer();
 
         int yOffset = 0;
@@ -567,6 +619,9 @@ public class GameEngine {
                                 int columns = activeTerminal != null ? activeTerminal.getWidth() : 100;
                                 int rows = activeTerminal != null ? activeTerminal.getHeight() : 55;
                                 JumpscareManager.playJumpscare(flashingEnabled, columns, rows);
+                                // JumpscarePreview restores the cursor for standalone use;
+                                // hide it again when returning to the running game.
+                                System.out.print("\033[?25l");
                             }
                             jumpscareTriggered = true;
                         }

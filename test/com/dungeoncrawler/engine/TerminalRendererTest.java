@@ -39,19 +39,35 @@ class TerminalRendererTest {
         TerminalRenderer renderer = new TerminalRenderer(100, 55);
         renderer.drawChar(99, 54, '#', "\033[31m");
         String output = renderer.buildFrame();
-        assertTrue(output.startsWith("\033[?7l\033[1;1H"));
+        assertTrue(output.startsWith("\033[1;1H"));
         assertTrue(output.contains("\033[55;1H"));
         assertFalse(output.contains("\n"), "Full-width rows must never emit scrolling newlines");
-        assertTrue(output.endsWith("\033[0m\033[?7h"), "Always restore colors and autowrap");
+        assertTrue(output.endsWith("\033[0m"), "Always reset text colours");
+        assertFalse(output.contains("\033[?7"), "Never change the terminal wrapping mode");
     }
 
     @Test
     void consecutiveSameColourCharactersDoNotRepeatEscapeCodes() {
-        TerminalRenderer renderer = new TerminalRenderer(3, 1);
+        TerminalRenderer renderer = new TerminalRenderer(4, 1);
         renderer.drawString(0, 0, "ABC", "\033[31m");
         String output = renderer.buildFrame();
         assertEquals(1, countOccurrences(output, "\033[31m"));
         assertTrue(output.contains("\033[31mABC"));
+    }
+
+    @Test
+    void compactRenderNeverAddressesRowsOutsideItsViewport() {
+        TerminalRenderer renderer = new TerminalRenderer(100, 55);
+        renderer.drawChar(79, 23, '@', "\033[31m");
+        renderer.drawChar(99, 54, 'X', "\033[31m");
+        String frame = renderer.buildFrame(80, 24);
+        assertTrue(frame.contains("\033[24;1H"));
+        assertFalse(frame.contains("\033[25;1H"));
+        assertFalse(frame.contains("\033[55;1H"));
+        assertFalse(frame.contains("X"));
+        assertTrue(frame.endsWith("\033[0m"));
+        assertFalse(frame.contains("\033[?7"));
+        assertThrows(IllegalArgumentException.class, () -> renderer.buildFrame(101, 24));
     }
 
     private static int countOccurrences(String text, String needle) {

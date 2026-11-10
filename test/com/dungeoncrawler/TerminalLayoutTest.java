@@ -12,9 +12,11 @@ class TerminalLayoutTest {
 
     @Test
     void rejectsSmallerOrUnknownDimensions() {
-        assertTrue(GameEngine.terminalTooSmall(99, 55));
-        assertTrue(GameEngine.terminalTooSmall(100, 54));
-        assertTrue(GameEngine.terminalTooSmall(80, 24));
+        assertFalse(GameEngine.terminalTooSmall(99, 55));
+        assertFalse(GameEngine.terminalTooSmall(100, 54));
+        assertFalse(GameEngine.terminalTooSmall(80, 24));
+        assertTrue(GameEngine.terminalTooSmall(79, 24));
+        assertTrue(GameEngine.terminalTooSmall(80, 23));
         assertTrue(GameEngine.terminalTooSmall(0, 0));
     }
 }

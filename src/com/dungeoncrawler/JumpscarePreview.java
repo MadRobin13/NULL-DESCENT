@@ -1,6 +1,9 @@
 package com.dungeoncrawler;
 
 import com.dungeoncrawler.engine.JumpscareManager;
+import org.jline.terminal.Terminal;
+import com.dungeoncrawler.engine.TerminalSession;
+import java.io.IOException;
 
 /** Run from the project root to preview the effect without risking a saved game. */
 public final class JumpscarePreview {
@@ -13,7 +16,14 @@ public final class JumpscarePreview {
             Thread.currentThread().interrupt();
             return;
         }
-        JumpscareManager.playJumpscare(flashing);
+        try (TerminalSession session = TerminalSession.open()) {
+            Terminal terminal = session.terminal();
+            JumpscareManager.playJumpscare(flashing, terminal.getWidth(), terminal.getHeight(),
+                terminal.writer(), false);
+        } catch (IOException | IllegalStateException ex) {
+            System.err.println("Cannot open interactive terminal for preview: " + ex.getMessage());
+            return;
+        }
         System.out.println("Preview complete. Terminal restored.");
     }
 }

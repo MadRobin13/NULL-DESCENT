@@ -120,6 +120,9 @@ class SaveLoadTest {
     void invalidExplorationCharacterIsRejected() throws IOException {
         goodSave();
         String data = Files.readString(savePath(), StandardCharsets.UTF_8);
+        // Save files use the host platform's newline (CRLF on Windows, LF on macOS/Linux).
+        // Normalize in the test so the intended corrupted-character check runs everywhere.
+        data = data.replace("\r\n", "\n");
         int start = data.indexOf("EXPLORED\n");
         assertTrue(start >= 0);
         int index = start + "EXPLORED\n".length();

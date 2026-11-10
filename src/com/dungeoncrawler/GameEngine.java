@@ -2,11 +2,12 @@ package com.dungeoncrawler;
 
 import com.dungeoncrawler.engine.FileManager;
 import com.dungeoncrawler.engine.TerminalRenderer;
+import com.dungeoncrawler.engine.TerminalSession;
+import com.dungeoncrawler.engine.TerminalInputParser;
 import com.dungeoncrawler.engine.EventManager;
 import com.dungeoncrawler.engine.MusicPlayer;
 import com.dungeoncrawler.engine.JumpscareManager;
 import org.jline.terminal.Terminal;
-import org.jline.terminal.TerminalBuilder;
 import org.jline.utils.NonBlockingReader;
 
 import java.io.IOException;
@@ -29,6 +30,9 @@ public class GameEngine {
     private boolean musicPausedForDeath = false;
     private Terminal activeTerminal;
     private int inventoryPage = 0;
+    private int lastLayout = -1; // 0 = normal, 1 = compact, 2 = resize warning
+    private boolean isStoryOpen = false;
+    private int storyPage = 0;
 
     // Game state flags
     private boolean isVictorious = false;
@@ -98,6 +102,8 @@ public class GameEngine {
         this.isInventoryMenuOpen = false;
         this.isHelpMenuOpen = false;
         this.inventoryPage = 0;
+        this.isStoryOpen = false;
+        this.storyPage = 0;
 
         // Reset state flags
         this.isVictorious = false;
@@ -114,13 +120,15 @@ public class GameEngine {
     }
 
     public void start() {
-        try (Terminal terminal = TerminalBuilder.builder().jna(true).system(true).build()) {
+        // JLine chooses the native Windows or Unix terminal provider. Both the
+        // renderer and the jumpscare must write through terminal.writer().
+        try (TerminalSession session = TerminalSession.open()) {
+            Terminal terminal = session.terminal();
             this.activeTerminal = terminal;
-            terminal.enterRawMode();
             NonBlockingReader reader = terminal.reader();
-
-            System.out.print("\033[2J\033[?25l"); // Clear screen and hide the cursor.
-            System.out.flush();
+            TerminalInputParser inputParser = new TerminalInputParser();
+            boolean firstPlayableFrame = true;
+            terminal.handle(Terminal.Signal.INT, signal -> isRunning = false);
 
             // Redraw on input or resize, not continuously during idle time.
             int previousWidth = -1;
@@ -130,6 +138,12 @@ public class GameEngine {
                 int currentWidth = terminal.getWidth();
                 int currentHeight = terminal.getHeight();
                 if (redraw || currentWidth != previousWidth || currentHeight != previousHeight) {
+                    if (firstPlayableFrame && !terminalTooSmall(currentWidth, currentHeight)) {
+                        firstPlayableFrame = false;
+                        // The full layout already shows the whole introduction above the map.
+                        // Compact terminals show it as a readable two-page opening screen.
+                        if (currentWidth < 100 || currentHeight < 55) openStory();
+                    }
                     updateLogic();
                     renderFrame();
                     previousWidth = currentWidth;
@@ -138,31 +152,41 @@ public class GameEngine {
                 }
 
                 int readChar = reader.read(250);
-                if (readChar == NonBlockingReader.READ_EXPIRED) continue;
+                if (readChar == NonBlockingReader.READ_EXPIRED) {
+                    inputParser.resetIncompleteSequence();
+                    continue;
+                }
                 if (readChar == NonBlockingReader.EOF) break;
 
-                char command = (char) readChar;
-                if (terminalTooSmall(currentWidth, currentHeight)
-                        && Character.toLowerCase(command) != 'q') {
-                    // Ignore movement and other inputs while the full display cannot fit.
+                Character parsed = inputParser.accept(readChar);
+                if (parsed == null) continue;
+                char command = parsed;
+                // In raw mode Ctrl+C is a character, not a terminal shutdown.
+                if (command == 3 || command == 4) {
+                    isRunning = false;
+                    break;
+                }
+                if (terminalTooSmall(currentWidth, currentHeight)) {
+                    // Keep the resize warning visible; Q always exits even if a menu was open.
+                    if (Character.toLowerCase(command) == 'q') isRunning = false;
                     continue;
                 }
                 processInput(command);
                 redraw = true;
             }
-        } catch (IOException e) {
+        } catch (IOException | IllegalStateException e) {
             System.err.println("Terminal init failed: " + e.getMessage());
         } finally {
+            // TerminalSession has already restored the user's original screen,
+            // cursor and raw-mode attributes before this is printed.
             activeTerminal = null;
             if (!testMode) musicPlayer.close();
-            System.out.print("\033[0m\033[?7h\033[?25h\033[2J\033[H");
             System.out.println("Connection terminated. Final Score: " + hero.getScore());
-            System.out.flush();
         }
     }
 
     static boolean terminalTooSmall(int width, int height) {
-        return width < 100 || height < 55;
+        return width < 80 || height < 24;
     }
 
     private void renderResizeWarning(int width, int height) {
@@ -171,7 +195,7 @@ public class GameEngine {
         int availableRows = Math.max(1, height);
         String[] lines = {
             "NULL//DESCENT - TERMINAL TOO SMALL",
-            "Requires at least 100 columns x 55 rows.",
+            "Requires at least 80 columns x 24 rows.",
             "Current size: " + width + " x " + height,
             "Resize the terminal to continue. Q to quit."
         };
@@ -180,8 +204,7 @@ public class GameEngine {
             message.append("\033[").append(i + 1).append(";1H");
             message.append(lines[i], 0, Math.min(usableWidth, lines[i].length()));
         }
-        System.out.print(message);
-        System.out.flush();
+        writeTerminal(message.toString());
     }
 
     private DungeonMap getCurrentMap() {
@@ -207,47 +230,267 @@ public class GameEngine {
 
     // Package-private to verify overlays without starting JLine.
     void renderFrame() {
-        if (activeTerminal != null && !testMode) {
-            int width = activeTerminal.getWidth();
-            int height = activeTerminal.getHeight();
-            if (terminalTooSmall(width, height)) {
-                renderResizeWarning(width, height);
-                return;
-            }
+        int width = activeTerminal != null && !testMode ? activeTerminal.getWidth() : 100;
+        int height = activeTerminal != null && !testMode ? activeTerminal.getHeight() : 55;
+        renderFrameAtSize(width, height);
+    }
+
+    // Keep the original full layout on large displays, but allow 80x24 Windows consoles.
+    void renderFrameAtSize(int width, int height) {
+        int layout = terminalTooSmall(width, height) ? 2 : (width < 100 || height < 55 ? 1 : 0);
+        if (layout != lastLayout) {
+            writeTerminal("\033[2J"); // Clear any remnants when switching layouts.
+            lastLayout = layout;
+        }
+        if (layout == 2) {
+            renderResizeWarning(width, height);
+            return;
         }
         renderer.clearBuffer();
-
-        int yOffset = 0;
-        for (String line : headerText) {
-            renderer.drawString(0, yOffset++, line, "\033[38;5;129m");
-        }
-
-        int mapStartY = yOffset + 1;
-
-        getCurrentMap().drawToBuffer(renderer, 0, mapStartY);
-
-        if (hero.getHp() <= 0) {
-            renderer.drawChar(hero.getX(), hero.getY() + mapStartY, 'X', "\033[38;5;196m");
+        if (isStoryOpen) {
+            drawStoryScreen();
+            renderBuffer(layout == 1 ? 80 : 100, layout == 1 ? 24 : 55);
+        } else if (layout == 1) {
+            drawCompactFrame();
+            renderBuffer(80, 24);
         } else {
-            renderer.drawChar(hero.getX(), hero.getY() + mapStartY, '@', "\033[38;5;51m");
+            int yOffset = 0;
+            for (String line : headerText) {
+                renderer.drawString(0, yOffset++, line, "\033[38;5;129m");
+            }
+            int mapStartY = yOffset + 1;
+            getCurrentMap().drawToBuffer(renderer, 0, mapStartY);
+            if (hero.getHp() <= 0) {
+                renderer.drawChar(hero.getX(), hero.getY() + mapStartY, 'X', "\033[38;5;196m");
+            } else {
+                renderer.drawChar(hero.getX(), hero.getY() + mapStartY, '@', "\033[38;5;51m");
+            }
+            drawHUD(mapStartY);
+            if (isVictorious) {
+                drawVictoryScreen(mapStartY);
+            } else if (hero.getHp() <= 0) {
+                drawDeathScreen(mapStartY);
+            } else if (isInventoryMenuOpen) {
+                drawInventoryMenu(mapStartY);
+            }
+            if (isHelpMenuOpen) drawHelpMenu(mapStartY);
+            renderBuffer(100, 55);
         }
+        if (activeTerminal != null && !testMode) activeTerminal.flush();
+        else System.out.flush();
+    }
 
-        drawHUD(mapStartY);
-
-        if (isVictorious) {
-            drawVictoryScreen(mapStartY);
-        } else if (hero.getHp() <= 0) {
-            drawDeathScreen(mapStartY);
-        } else if (isInventoryMenuOpen) {
-            drawInventoryMenu(mapStartY);
+    private void renderBuffer(int columns, int rows) {
+        if (activeTerminal != null && !testMode) {
+            renderer.render(activeTerminal.writer(), columns, rows);
+        } else {
+            renderer.render(columns, rows);
         }
+    }
 
-        if (isHelpMenuOpen) {
-            drawHelpMenu(mapStartY);
+    private void writeTerminal(String output) {
+        if (activeTerminal != null && !testMode) {
+            activeTerminal.writer().print(output);
+            activeTerminal.flush();
+        } else {
+            System.out.print(output);
         }
+    }
 
-        renderer.render();
-        System.out.flush();
+    private void openStory() {
+        isStoryOpen = true;
+        storyPage = 0;
+    }
+
+    /**
+     * The original introduction doesn't fit above a 19-row map in 24 rows.
+     * Present it separately on compact displays instead of silently hiding it.
+     * A full-size display still retains its original permanent introduction.
+     */
+    private void drawStoryScreen() {
+        final String purple = "\033[38;5;129m";
+        final String cyan = "\033[38;5;51m";
+        final String gray = "\033[38;5;245m";
+        final String yellow = "\033[38;5;226m";
+
+        if (storyPage == 0) {
+            // Original ASCII banner, trimming only whitespace that exceeds 79 columns.
+            for (int row = 0; row < 6; row++) {
+                drawCompactText(0, row + 1, headerText[row].stripTrailing(), purple);
+            }
+            drawCompactText(2, 9, "System Breach Detected...", cyan);
+            drawStoryParagraph(9, 13, 11, gray);
+            drawCompactText(2, 20, "MISSION: Descend ten sectors and reclaim the mainframe.", yellow);
+        } else {
+            drawCompactText(2, 2, "NULL//DESCENT  //  INCOMING TRANSMISSION", purple);
+            drawCompactText(2, 4, "RECOVERED SYSTEM LOGS", cyan);
+            int y = drawStoryParagraph(15, 19, 6, gray);
+            drawCompactText(2, y + 1, "YOUR OBJECTIVE", cyan);
+            drawStoryParagraph(21, 23, y + 3, gray);
+        }
+        drawCompactText(1, 22, storyPage == 0
+            ? "[ENTER / SPACE / N] Continue   [T / Q] Skip to game"
+            : "[ENTER / SPACE / N] Start game   [P] Previous   [T / Q] Close", yellow);
+        drawCompactText(1, 23, "Arrow keys: movement   |   Mouse scrolling: ignored", gray);
+    }
+
+    /** Rewrap the existing intro; maintain its wording rather than duplicating it. */
+    private int drawStoryParagraph(int first, int last, int y, String color) {
+        StringBuilder paragraph = new StringBuilder();
+        for (int i = first; i <= last; i++) {
+            if (!paragraph.isEmpty()) paragraph.append(' ');
+            paragraph.append(headerText[i].trim());
+        }
+        StringBuilder row = new StringBuilder();
+        for (String word : paragraph.toString().split(" +")) {
+            if (row.length() > 0 && row.length() + word.length() + 1 > 75) {
+                drawCompactText(2, y++, row.toString(), color);
+                row.setLength(0);
+            }
+            if (!row.isEmpty()) row.append(' ');
+            row.append(word);
+        }
+        if (!row.isEmpty()) drawCompactText(2, y++, row.toString(), color);
+        return y;
+    }
+
+    /** A compact version of the same game, not a different game mode. */
+    private void drawCompactFrame() {
+        final String purple = "\033[38;5;129m";
+        final String cyan = "\033[38;5;51m";
+        final String yellow = "\033[38;5;226m";
+        final String gray = "\033[38;5;245m";
+        final String red = "\033[38;5;196m";
+        drawCompactText(0, 0,
+            " NULL//DESCENT  |  CORE NETWORK  |  SECTOR " + (currentFloorIndex + 1)
+                + "/10  |  H: Help  T: Story", purple);
+
+        // The real 58x19 map fits entirely into 80 columns without a scrolling camera.
+        int mapY = 1;
+        getCurrentMap().drawToBuffer(renderer, 0, mapY);
+        renderer.drawChar(hero.getX(), hero.getY() + mapY,
+            hero.getHp() <= 0 ? 'X' : '@', hero.getHp() <= 0 ? red : cyan);
+
+        int x = 60;
+        drawCompactText(x, 1, "-- SYSTEM STATUS --", yellow);
+        drawCompactText(x, 2, "HP: " + hero.getHp() + "/" + hero.getMaxHp(),
+            hero.getHp() <= 25 ? red : cyan);
+        drawCompactText(x, 3, "Score: " + hero.getScore(), yellow);
+        drawCompactText(x, 4, "Patch: " + (hero.isFirewallPatchActive() ? "ACTIVE" : "NONE"), cyan);
+        drawCompactText(x, 6, "-- MAP LEGEND --", yellow);
+        drawCompactText(x, 7, "@ Player", cyan);
+        drawCompactText(x, 8, "< > Stairs", gray);
+        drawCompactText(x, 9, "M Mainframe", cyan);
+        drawCompactText(x, 10, "B/V Virus enemies", red);
+        drawCompactText(x, 11, "O Final boss", red);
+        drawCompactText(x, 12, "T Trap / F Patch", yellow);
+        drawCompactText(x, 13, "H Heal / ? Unknown", cyan);
+        drawCompactText(x, 14, "$ Score fragment", yellow);
+        drawCompactText(x, 16, "-- INVENTORY --", yellow);
+        List<Item> inv = hero.getInventory();
+        drawCompactText(x, 17, inv.size() + " item(s)", gray);
+        drawCompactText(x, 18, "I: View / Use", cyan);
+        drawCompactText(x, 19, "1/2: Sort items", gray);
+
+        drawCompactText(0, 20, "=".repeat(79), gray);
+        List<EventManager.EventLog> logs = eventManager.getRecentLogs();
+        int from = Math.max(0, logs.size() - 2);
+        for (int i = from; i < logs.size(); i++) {
+            EventManager.EventLog log = logs.get(i);
+            String color = switch (log.type) {
+                case DAMAGE -> red;
+                case LOOT -> yellow;
+                case COMBAT -> "\033[38;5;208m";
+                case SYSTEM -> gray;
+            };
+            drawCompactText(1, 21 + i - from, log.message, color);
+        }
+        drawCompactText(0, 23, " WASD Move / Arrows | E Use | I Bag | H Help | T Story | K/L Save/Load | Q Quit", cyan);
+
+        if (isVictorious) drawCompactEndScreen(true);
+        else if (hero.getHp() <= 0) drawCompactEndScreen(false);
+        else if (isInventoryMenuOpen) drawCompactInventory();
+        if (isHelpMenuOpen) drawCompactHelp();
+    }
+
+    private void drawCompactText(int x, int y, String text, String color) {
+        int available = 80 - x;
+        if (available > 0 && y >= 0 && y < 24) {
+            renderer.drawString(x, y,
+                text.length() <= available ? text : text.substring(0, available), color);
+        }
+    }
+
+    private void clearCompactOverlay(int x, int y, int columns, int rows) {
+        for (int row = 0; row < rows; row++) {
+            drawCompactText(x, y + row, " ".repeat(columns), TerminalRenderer.RESET);
+        }
+    }
+
+    private void drawCompactEndScreen(boolean won) {
+        int x = 8, y = 6;
+        String color = won ? "\033[38;5;46m" : "\033[38;5;196m";
+        clearCompactOverlay(x, y, 63, 9);
+        drawCompactText(x + 1, y + 1, "==========================================================", color);
+        drawCompactText(x + 2, y + 2, won ? "MAINFRAME HACKED. MISSION ACCOMPLISHED!"
+            : "CRITICAL FAILURE. CONNECTION LOST.", color);
+        drawCompactText(x + 2, y + 4, "Final Score: " + hero.getScore(), "\033[38;5;255m");
+        drawCompactText(x + 2, y + 6, "[R] Restart  |  [L] Load Run  |  [Q] Quit", "\033[38;5;51m");
+        drawCompactText(x + 1, y + 7, "==========================================================", color);
+    }
+
+    private void drawCompactInventory() {
+        int x = 3, y = 2;
+        clearCompactOverlay(x, y, 74, 18);
+        String yellow = "\033[38;5;226m";
+        String cyan = "\033[38;5;51m";
+        String gray = "\033[38;5;245m";
+        List<Item> inv = hero.getInventory();
+        int maxPages = Math.max(1, (inv.size() + 4) / 5);
+        drawCompactText(x, y, "========================== INVENTORY ===========================", yellow);
+        drawCompactText(x + 2, y + 1, "Page " + (inventoryPage + 1) + "/" + maxPages
+            + "  |  1-5 Use  |  N/P Pages  |  I/Q Close", cyan);
+        if (inv.isEmpty()) drawCompactText(x + 3, y + 4, "(Inventory is empty)", gray);
+        for (int i = 0; i < 5; i++) {
+            int index = inventoryPage * 5 + i;
+            if (index >= inv.size()) break;
+            Item item = inv.get(index);
+            drawCompactText(x + 3, y + 3 + i * 2,
+                "[" + (i + 1) + "] " + item.getName() + " (Value: " + item.getValue() + ")", cyan);
+            String action = switch (item.getName()) {
+                case "Health Syringe" -> "Restore 5 HP";
+                case "Firewall Patch" -> "Block next trap";
+                case "Corrupted Cache" -> "Random reward or damage";
+                case "Data Fragment" -> "Score already collected";
+                default -> "No action";
+            };
+            drawCompactText(x + 7, y + 4 + i * 2, action, gray);
+        }
+        drawCompactText(x, y + 17, "===============================================================", yellow);
+    }
+
+    private void drawCompactHelp() {
+        clearCompactOverlay(0, 1, 80, 23);
+        String cyan = "\033[38;5;51m";
+        String yellow = "\033[38;5;226m";
+        String gray = "\033[38;5;245m";
+        drawCompactText(1, 1, "========================= HELP / CONTROLS =========================", yellow);
+        drawCompactText(2, 2, "System Overlord controls the corrupted network. Descend 10 sectors, defeat", gray);
+        drawCompactText(2, 3, "the boss, and hack the mainframe (M) to reclaim the system.", gray);
+        drawCompactText(2, 5, "CONTROLS", cyan);
+        drawCompactText(2, 6, "WASD/Arrows Move / bump enemies to attack   E Interact on stairs/mainframe", gray);
+        drawCompactText(2, 7, "I Inventory (1-5 use, N/P pages, I/Q close)", gray);
+        drawCompactText(2, 8, "1/2 Sort items by name/value           H/Q Close this help screen", gray);
+        drawCompactText(2, 9, "K Save   L Load   R Restart   Q Quit   F Toggle jumpscare flashes", gray);
+        drawCompactText(2, 11, "MAP / ITEMS", cyan);
+        drawCompactText(2, 12, "@ You      < / > Stairs      M Mainframe      B/V Viruses      O Boss", gray);
+        drawCompactText(2, 13, "F Firewall Patch (activate from inventory; blocks next T trap)", gray);
+        drawCompactText(2, 14, "T Trap (-35 HP)    H Health (+25 HP)    $ Data (+100 score)", gray);
+        drawCompactText(2, 15, "? Unknown: item cache, health syringe, or -5 HP trap", gray);
+        drawCompactText(2, 16, "Syringe: +5 HP when used   Corrupted Cache: +50 score or -10 HP", gray);
+        drawCompactText(2, 18, "Enemies take turns when you move; menus pause combat.", cyan);
+        drawCompactText(2, 20, "Press T to read the complete title and story on any terminal.", gray);
+        drawCompactText(1, 22, "=========================== H / Q CLOSE ==========================", yellow);
     }
 
     private void drawVictoryScreen(int mapStartY) {
@@ -361,7 +604,7 @@ public class GameEngine {
         renderer.drawString(rightColumn, mapStartY + 9, "Corrupted Cache: 50% +50 score", textColor);
         renderer.drawString(3, mapStartY + 10, "Q  Quit game (outside menus)", textColor);
         renderer.drawString(rightColumn, mapStartY + 10, "                 50% -10 HP", textColor);
-        renderer.drawString(3, mapStartY + 11, "H  Help | F  Toggle jumpscare flashes", textColor);
+        renderer.drawString(3, mapStartY + 11, "H  Help | T  Story | F  Toggle jumpscare flashes", textColor);
         renderer.drawString(rightColumn, mapStartY + 11, "Item value is for sorting, not money", textColor);
 
         renderer.drawString(3, mapStartY + 13, "INVENTORY", headingColor);
@@ -446,14 +689,26 @@ public class GameEngine {
     private void processInput(char command) {
         command = Character.toLowerCase(command);
 
+        if (isStoryOpen) {
+            if (command == 't' || command == 'q' || command == 27) isStoryOpen = false;
+            else if (command == 'p') storyPage = Math.max(0, storyPage - 1);
+            else if (command == 'n' || command == ' ' || command == '\n') {
+                if (storyPage == 0) storyPage = 1;
+                else isStoryOpen = false;
+            }
+            return;
+        }
+
         if (isHelpMenuOpen) {
-            if (command == 'h' || command == 'q') isHelpMenuOpen = false;
+            if (command == 't') { isHelpMenuOpen = false; openStory(); }
+            else if (command == 'h' || command == 'q') isHelpMenuOpen = false;
             return;
         }
 
         if (isVictorious) {
             if (command == 'r') initializeNewRun();
             if (command == 'l') handleLoad();
+            if (command == 't') openStory();
             if (command == 'q') isRunning = false;
             return;
         }
@@ -462,6 +717,7 @@ public class GameEngine {
             if (command == 'h') isHelpMenuOpen = true;
             if (command == 'r') initializeNewRun();
             if (command == 'l') handleLoad();
+            if (command == 't') openStory();
             if (command == 'q') isRunning = false;
             return;
         }
@@ -482,6 +738,7 @@ public class GameEngine {
             case '2' -> { hero.sortInventory("value"); eventManager.publishEvent("Sorted inventory by Value.", EventManager.EventType.SYSTEM); }
             case 'i' -> { isInventoryMenuOpen = true; inventoryPage = 0; }
             case 'h' -> isHelpMenuOpen = true;
+            case 't' -> openStory();
             case 'k' -> handleSave();
             case 'l' -> handleLoad();
             case 'f' -> {
@@ -618,10 +875,10 @@ public class GameEngine {
                             if (!testMode) {
                                 int columns = activeTerminal != null ? activeTerminal.getWidth() : 100;
                                 int rows = activeTerminal != null ? activeTerminal.getHeight() : 55;
-                                JumpscareManager.playJumpscare(flashingEnabled, columns, rows);
-                                // JumpscarePreview restores the cursor for standalone use;
-                                // hide it again when returning to the running game.
-                                System.out.print("\033[?25l");
+                                if (activeTerminal != null) {
+                                    JumpscareManager.playJumpscare(flashingEnabled, columns, rows,
+                                        activeTerminal.writer(), false);
+                                }
                             }
                             jumpscareTriggered = true;
                         }
@@ -691,6 +948,9 @@ public class GameEngine {
     boolean isRunning() { return isRunning; }
     Player getHero() { return hero; }
     EventManager getEventManager() { return eventManager; }
+
+    boolean isStoryOpenForTest() { return isStoryOpen; }
+    int storyPageForTest() { return storyPage; }
 
     void processTestInput(char command) {
         processInput(command);

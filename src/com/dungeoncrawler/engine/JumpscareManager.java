@@ -9,7 +9,8 @@ import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.File;
-import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 
 /** Renders the game's original cyberpunk pixel-art jumpscare inside the terminal. */
@@ -46,17 +47,30 @@ public final class JumpscareManager {
      * Play a roughly two-second blocking animation. No game turns occur while it runs.
      * Actual terminal dimensions are passed by GameEngine; no JLine coupling is required.
      */
-    public static synchronized void playJumpscare(boolean flashingEnabled, int terminalColumns, int terminalRows) {
+    public static void playJumpscare(boolean flashingEnabled, int terminalColumns, int terminalRows) {
+        // Standalone fallback. GameEngine/JumpscarePreview use the JLine writer below.
+        PrintWriter out = new PrintWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8));
+        playJumpscare(flashingEnabled, terminalColumns, terminalRows, out, true);
+    }
+
+    /**
+     * Render via the same Unicode-capable JLine writer used by the game.
+     * The running game owns an alternate screen already; only standalone
+     * previews should create and release their own alternate screen.
+     */
+    public static synchronized void playJumpscare(boolean flashingEnabled, int terminalColumns,
+                                                   int terminalRows, PrintWriter out,
+                                                   boolean standalonePreview) {
         int columns = terminalColumns > 0 ? Math.min(MAX_COLUMNS, terminalColumns) : MAX_COLUMNS;
         int rows = terminalRows > 0 ? Math.min(MAX_ROWS, terminalRows) : MAX_ROWS;
         if (columns < 8 || rows < 5) return; // Terminal too small to show anything useful.
         ensureFrames(columns, rows);
 
-        PrintStream out = System.out;
         Clip sound = null;
         String soundError = null;
         try {
             File audio = new File("jumpscare.wav");
+            if (!audio.isFile()) audio = new File("jumpscare.WAV");
             if (audio.isFile()) {
                 try (AudioInputStream stream = AudioSystem.getAudioInputStream(audio)) {
                     sound = AudioSystem.getClip();
@@ -69,9 +83,10 @@ public final class JumpscareManager {
                 soundError = "jumpscare.wav not found (visual animation will still play)";
             }
 
-            // Alternate screen preserves the original game display and terminal scrollback.
-            // Disable autowrap to avoid full-width rows scrolling the last line.
-            out.print(ESC + "?1049h" + ESC + "?25l" + ESC + "?7l" + ESC + "0m" + ESC + "2J" + ESC + "H");
+            // GameEngine is already in its own alternate screen. Avoid nesting
+            // alternate buffers, which can restore the wrong Windows screen.
+            if (standalonePreview) out.print(ESC + "?1049h");
+            out.print(ESC + "?25l" + ESC + "0m" + ESC + "2J" + ESC + "H");
             out.flush();
 
             long beginning = System.nanoTime();
@@ -98,17 +113,24 @@ public final class JumpscareManager {
                 sound.stop();
                 sound.close();
             }
-            // Always restore the cursor, wrapping, normal colours, and game screen.
-            out.print(ESC + "0m" + ESC + "?7h" + ESC + "?25h" + ESC + "?1049l");
+            // Never alter autowrap, terminal font, codepage or console size.
+            out.print(ESC + "0m");
+            if (standalonePreview) {
+                out.print(ESC + "?25h" + ESC + "?1049l");
+            } else {
+                // The game keeps the cursor hidden and redraws the next frame.
+                out.print(ESC + "2J" + ESC + "H" + ESC + "?25l");
+            }
             out.flush();
-            if (soundError != null) System.err.println("Jumpscare audio: " + soundError);
+            if (soundError != null && Boolean.getBoolean("null.descent.debug")) {
+                System.err.println("Jumpscare audio: " + soundError);
+            }
         }
     }
 
-    private static void show(PrintStream out, String frame) {
-        // Send UTF-8 explicitly: the system console's default charset can be ASCII.
-        byte[] encoded = frame.getBytes(StandardCharsets.UTF_8);
-        out.write(encoded, 0, encoded.length);
+    private static void show(PrintWriter out, String frame) {
+        // A JLine PrintWriter handles Windows console Unicode and colour modes.
+        out.print(frame);
         out.flush();
     }
 
@@ -191,11 +213,18 @@ public final class JumpscareManager {
     private static String solidScreen(int columns, int rows, int red, int green, int blue) {
         StringBuilder sb = new StringBuilder(ESC).append("48;2;")
             .append(red).append(';').append(green).append(';').append(blue).append('m');
-        String spaces = " ".repeat(columns);
+        // Reserve the rightmost cell to prevent wrap on Windows and macOS.
+        String spaces = " ".repeat(Math.max(0, columns - 1));
         for (int y = 1; y <= rows; y++) {
             sb.append(ESC).append(y).append(";1H").append(spaces);
         }
         return sb.append(ESC).append("0m").toString();
+    }
+
+    // Headless verification of the actual terminal frame without a two-second animation.
+    static synchronized String frameForTest(int columns, int rows) {
+        ensureFrames(columns, rows);
+        return normalFrame;
     }
 
     private static void appendColour(StringBuilder sb, int code, int rgb) {

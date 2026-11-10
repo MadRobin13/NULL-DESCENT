@@ -1,5 +1,7 @@
 package com.dungeoncrawler.engine;
 
+import java.io.PrintWriter;
+
 public class TerminalRenderer {
     public static final char WALL_SOLID = '\u2588';
     public static final char FOG_HEAVY  = '\u2593';
@@ -52,24 +54,33 @@ public class TerminalRenderer {
         }
     }
 
-    /**
-     * Draw each row at an absolute cursor position, so writing the last screen
-     * cell cannot scroll the terminal. Wrapping is disabled only while this
-     * frame is printed and restored afterward.
-     */
-    public void render() {
-        System.out.print(buildFrame());
+    /** Render through the active JLine terminal, preserving its output encoding. */
+    public void render(PrintWriter out, int columns, int rows) {
+        out.print(buildFrame(columns, rows));
+        out.flush();
     }
 
-    // Package-private for headless rendering tests.
-    String buildFrame() {
-        StringBuilder frame = new StringBuilder(width * height + 512);
-        frame.append("\033[?7l"); // Disable automatic line wrapping for full-width rows.
-        String currentColor = RESET;
+    /** Keep the headless render entry points used by the existing tests. */
+    public void render() { System.out.print(buildFrame()); }
+    public void render(int columns, int rows) { System.out.print(buildFrame(columns, rows)); }
 
-        for (int y = 0; y < height; y++) {
+    // Package-private for headless rendering tests.
+    String buildFrame() { return buildFrame(width, height); }
+
+    /**
+     * Each row uses absolute positioning. Never write the terminal's rightmost
+     * cell: some Windows console hosts wrap when it is filled, even without a
+     * newline. This also avoids changing the user's autowrap setting at all.
+     */
+    String buildFrame(int columns, int rows) {
+        if (columns < 1 || rows < 1 || columns > width || rows > height) {
+            throw new IllegalArgumentException("Invalid render dimensions");
+        }
+        StringBuilder frame = new StringBuilder(columns * rows + 512);
+        String currentColor = RESET;
+        for (int y = 0; y < rows; y++) {
             frame.append("\033[").append(y + 1).append(";1H");
-            for (int x = 0; x < width; x++) {
+            for (int x = 0; x < columns - 1; x++) {
                 String targetColor = colorBuffer[y][x];
                 if (!targetColor.equals(currentColor)) {
                     frame.append(targetColor);
@@ -78,9 +89,7 @@ public class TerminalRenderer {
                 frame.append(screenBuffer[y][x]);
             }
         }
-
-        frame.append(RESET).append("\033[?7h");
-        return frame.toString();
+        return frame.append(RESET).toString();
     }
 
     // Package-private to allow tests to inspect the buffer without a terminal.

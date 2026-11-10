@@ -10,11 +10,11 @@ public class EventManager {
         DAMAGE,
         COMBAT
     }
-    
+
     public static class EventLog {
         public final String message;
         public final EventType type;
-        
+
         public EventLog(String message, EventType type) {
             this.message = message;
             this.type = type;
@@ -33,5 +33,9 @@ public class EventManager {
 
     public List<EventLog> getRecentLogs() {
         return recentLogs;
+    }
+
+    public void clear() {
+        recentLogs.clear();
     }
 }

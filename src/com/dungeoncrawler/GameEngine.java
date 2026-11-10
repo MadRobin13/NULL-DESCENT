@@ -19,17 +19,24 @@ public class GameEngine {
     private final EventManager eventManager;
     private Player hero;
     private final MusicPlayer musicPlayer;
-    
+
     private List<DungeonMap> floors;
-    private int currentFloorIndex; 
-    
+    private int currentFloorIndex;
+
     private boolean isInventoryMenuOpen = false;
     private boolean isHelpMenuOpen = false;
     private boolean flashingEnabled = true;
     private boolean musicPausedForDeath = false;
     private Terminal activeTerminal;
     private int inventoryPage = 0;
-    
+
+    // Game state flags
+    private boolean isVictorious = false;
+    private boolean deathMessagePublished = false;
+    private boolean jumpscareTriggered = false;
+    private final boolean testMode;
+    private final String saveFilePath;
+
     private final String[] headerText = {
         "  _    _ _    _ _      _          ____  _____  _____  _____  _____  _    _  _____ ",
         " | \\ | | | | | |    | |        |  _ \\|  ___|/  ___|/  __ \\|  ___|| \\ | ||_   _|",
@@ -60,30 +67,49 @@ public class GameEngine {
     };
 
     public GameEngine() {
+        this(false, "savegame.txt");
+    }
+
+    // Package-private test entry points keep file I/O isolated from the real savegame.
+    GameEngine(boolean testMode) {
+        this(testMode, "savegame.txt");
+    }
+
+    GameEngine(boolean testMode, String saveFilePath) {
+        this.testMode = testMode;
+        this.saveFilePath = java.util.Objects.requireNonNull(saveFilePath);
         this.renderer = new TerminalRenderer(100, 55);
         this.eventManager = new EventManager();
         this.musicPlayer = new MusicPlayer();
         this.isRunning = true;
-        
-        this.musicPlayer.playLoop("bgm.wav");
-        JumpscareManager.initialize();
-        
+
+        if (!testMode) {
+            this.musicPlayer.playLoop("bgm.wav");
+            JumpscareManager.initialize();
+        }
+
         initializeNewRun();
     }
-    
+
     private void initializeNewRun() {
-        this.hero = new Player(0, 0); 
+        this.hero = new Player(0, 0);
         this.floors = new ArrayList<>();
         this.currentFloorIndex = 0;
         this.isInventoryMenuOpen = false;
         this.isHelpMenuOpen = false;
         this.inventoryPage = 0;
-        
+
+        // Reset state flags
+        this.isVictorious = false;
+        this.deathMessagePublished = false;
+        this.jumpscareTriggered = false;
+        this.eventManager.clear();
+
         DungeonMap startMap = new DungeonMap(58, 19, false, 0);
         this.floors.add(startMap);
         this.hero.setPosition(startMap.getStartX(), startMap.getStartY());
         resumeMusicAfterDeath();
-        
+
         eventManager.publishEvent("OS Booted. Infiltration begun.", EventManager.EventType.SYSTEM);
     }
 
@@ -92,13 +118,13 @@ public class GameEngine {
             this.activeTerminal = terminal;
             terminal.enterRawMode();
             NonBlockingReader reader = terminal.reader();
-            
-            System.out.print("\033[2J"); 
+
+            System.out.print("\033[2J");
 
             while (isRunning) {
                 updateLogic();
                 renderFrame();
-                
+
                 int readChar = reader.read();
                 if (readChar != -1) {
                     processInput((char) readChar);
@@ -108,8 +134,8 @@ public class GameEngine {
             System.err.println("Terminal init failed: " + e.getMessage());
         } finally {
             activeTerminal = null;
-            musicPlayer.close();
-            System.out.print("\033[2J\033[H"); 
+            if (!testMode) musicPlayer.close();
+            System.out.print("\033[2J\033[H");
             System.out.println("Connection terminated. Final Score: " + hero.getScore());
         }
     }
@@ -119,64 +145,115 @@ public class GameEngine {
     }
 
     private void updateLogic() {
-        if (hero.getHp() <= 0) {
-            eventManager.publishEvent("CRITICAL FAILURE. CONNECTION LOST. Press 'r' to restart.", EventManager.EventType.DAMAGE);
+        if (isVictorious) {
+            // Do nothing, state frozen
+        } else if (hero.getHp() <= 0) {
+            if (!deathMessagePublished) {
+                eventManager.publishEvent("CRITICAL FAILURE. CONNECTION LOST. Press 'r' to restart.", EventManager.EventType.DAMAGE);
+                deathMessagePublished = true;
+                if (!musicPausedForDeath) {
+                    musicPlayer.stop();
+                    musicPausedForDeath = true;
+                }
+            }
         } else {
-            getCurrentMap().calculateFOV(hero.getX(), hero.getY(), 6); 
+            getCurrentMap().calculateFOV(hero.getX(), hero.getY(), 6);
         }
     }
 
-    private void renderFrame() {
+    // Package-private to verify overlays without starting JLine.
+    void renderFrame() {
         renderer.clearBuffer();
-        
+
         int yOffset = 0;
         for (String line : headerText) {
-            renderer.drawString(0, yOffset++, line, "\033[38;5;129m"); 
+            renderer.drawString(0, yOffset++, line, "\033[38;5;129m");
         }
-        
-        int mapStartY = yOffset + 1; 
-        
+
+        int mapStartY = yOffset + 1;
+
         getCurrentMap().drawToBuffer(renderer, 0, mapStartY);
-        
+
         if (hero.getHp() <= 0) {
             renderer.drawChar(hero.getX(), hero.getY() + mapStartY, 'X', "\033[38;5;196m");
         } else {
-            renderer.drawChar(hero.getX(), hero.getY() + mapStartY, '@', "\033[38;5;51m"); 
+            renderer.drawChar(hero.getX(), hero.getY() + mapStartY, '@', "\033[38;5;51m");
         }
-        
+
         drawHUD(mapStartY);
-        
-        if (isInventoryMenuOpen) {
+
+        if (isVictorious) {
+            drawVictoryScreen(mapStartY);
+        } else if (hero.getHp() <= 0) {
+            drawDeathScreen(mapStartY);
+        } else if (isInventoryMenuOpen) {
             drawInventoryMenu(mapStartY);
         }
+
         if (isHelpMenuOpen) {
             drawHelpMenu(mapStartY);
         }
-        
+
         renderer.render();
-        System.out.flush(); 
+        System.out.flush();
     }
-    
+
+    private void drawVictoryScreen(int mapStartY) {
+        int menuX = 22;
+        int menuY = mapStartY + 5;
+
+        String clearLine = " ".repeat(55);
+        for (int i = 0; i < 10; i++) {
+            renderer.drawString(menuX, menuY + i, clearLine, "\033[0m");
+        }
+
+        renderer.drawString(menuX, menuY++, "=======================================================", "\033[38;5;46m");
+        renderer.drawString(menuX, menuY++, "        MAINFRAME HACKED. MISSION ACCOMPLISHED!        ", "\033[38;5;46m");
+        renderer.drawString(menuX, menuY++, "=======================================================", "\033[38;5;46m");
+        renderer.drawString(menuX, menuY++, " Final Score: " + hero.getScore(), "\033[38;5;255m");
+        renderer.drawString(menuX, menuY++, "                                                       ", "\033[38;5;255m");
+        renderer.drawString(menuX, menuY++, " [R] Restart System                                    ", "\033[38;5;51m");
+        renderer.drawString(menuX, menuY++, " [L] Load Saved Run                                    ", "\033[38;5;226m");
+        renderer.drawString(menuX, menuY++, " [Q] Disconnect (Quit)                                 ", "\033[38;5;196m");
+        renderer.drawString(menuX, menuY++, "=======================================================", "\033[38;5;46m");
+    }
+
+    private void drawDeathScreen(int mapStartY) {
+        int menuX = 22;
+        int menuY = mapStartY + 5;
+        for (int i = 0; i < 9; i++) {
+            renderer.drawString(menuX, menuY + i, " ".repeat(55), TerminalRenderer.RESET);
+        }
+        renderer.drawString(menuX, menuY++, "=======================================================", "\033[38;5;196m");
+        renderer.drawString(menuX, menuY++, "          CRITICAL FAILURE. CONNECTION LOST.           ", "\033[38;5;196m");
+        renderer.drawString(menuX, menuY++, "=======================================================", "\033[38;5;196m");
+        renderer.drawString(menuX, menuY++, " Final Score: " + hero.getScore(), "\033[38;5;255m");
+        renderer.drawString(menuX, menuY++, "                                                       ", TerminalRenderer.RESET);
+        renderer.drawString(menuX, menuY++, " [R] Restart | [L] Load Saved Run | [H] Help            ", "\033[38;5;51m");
+        renderer.drawString(menuX, menuY++, " [Q] Disconnect (Quit)                                 ", "\033[38;5;196m");
+        renderer.drawString(menuX, menuY, "=======================================================", "\033[38;5;196m");
+    }
+
     private void drawInventoryMenu(int mapStartY) {
         int menuX = 5;
         int menuY = mapStartY + 2;
-        
-        String clearLine = " ".repeat(100 - menuX); 
+
+        String clearLine = " ".repeat(100 - menuX);
         for (int i = 0; i < 14; i++) {
             renderer.drawString(menuX, menuY + i, clearLine, "\033[0m");
         }
-        
+
         renderer.drawString(menuX, menuY++, "========================= INVENTORY MENU =========================", "\033[38;5;226m");
-        
+
         List<Item> inv = hero.getInventory();
         int maxPages = Math.max(1, (int)Math.ceil(inv.size() / 5.0));
-        
+
         renderer.drawString(menuX, menuY++, " Page " + (inventoryPage + 1) + "/" + maxPages + " | [1-5] Use Item | [N] Next | [P] Prev | [I/Q] Close ", "\033[38;5;255m");
         renderer.drawString(menuX, menuY++, "------------------------------------------------------------------", "\033[38;5;255m");
-        
+
         if (inv.isEmpty()) {
             renderer.drawString(menuX + 2, menuY++, "(Inventory is empty)", "\033[38;5;245m");
-            menuY += 9; 
+            menuY += 9;
         } else {
             int startIdx = inventoryPage * 5;
             for (int i = 0; i < 5; i++) {
@@ -188,20 +265,18 @@ public class GameEngine {
                     else if (it.getName().equals("Firewall Patch")) action = "Protect vs 1 Trap";
                     else if (it.getName().equals("Corrupted Cache")) action = "Decrypt (Reward/Penalty)";
                     else if (it.getName().equals("Data Fragment")) action = "Collectible (Score already added)";
-                    
+
                     renderer.drawString(menuX, menuY++, " [" + (i + 1) + "] " + it.getName() + " (Value: " + it.getValue() + ")", "\033[38;5;51m");
                     renderer.drawString(menuX + 5, menuY++, "-> Action: " + action, "\033[38;5;245m");
                 } else {
                     renderer.drawString(menuX, menuY++, " [" + (i + 1) + "] ---", "\033[38;5;239m");
-                    menuY++; 
+                    menuY++;
                 }
             }
         }
         renderer.drawString(menuX, menuY, "==================================================================", "\033[38;5;226m");
     }
 
-    // Help covers the map and legend without touching the status bar or event log.
-    // It uses the same renderer as the inventory and requires no extra library.
     private void drawHelpMenu(int mapStartY) {
         final String titleColor = "\033[38;5;226m";
         final String headingColor = "\033[38;5;51m";
@@ -209,7 +284,6 @@ public class GameEngine {
         final String detailColor = "\033[38;5;245m";
         final int rightColumn = 52;
 
-        // Clear all map and legend columns so nothing shows through the help text.
         for (int row = 0; row < 20; row++) {
             renderer.drawString(0, mapStartY + row, " ".repeat(100), TerminalRenderer.RESET);
         }
@@ -255,8 +329,7 @@ public class GameEngine {
 
     private void drawHUD(int mapStartY) {
         int lX = 60;
-        
-        // Group similar colours and related objects together.
+
         renderer.drawString(lX, mapStartY,      "--- LEGEND ---", "\033[38;5;255m");
         renderer.drawString(lX, mapStartY + 1,  "@ Player", "\033[38;5;51m");
         renderer.drawString(lX, mapStartY + 2,  "M Mainframe", "\033[38;5;51m");
@@ -277,42 +350,42 @@ public class GameEngine {
         int invY = mapStartY + 16;
         renderer.drawString(lX, invY++, "--- INVENTORY ---", "\033[38;5;255m");
         List<Item> inv = hero.getInventory();
-        
+
         if (inv.isEmpty()) {
             renderer.drawString(lX, invY, "(Empty)", "\033[38;5;245m");
         } else {
             int maxDisplayed = Math.min(inv.size(), 3);
-            if (inv.size() > 3) maxDisplayed = 2; 
-            
+            if (inv.size() > 3) maxDisplayed = 2;
+
             for (int i = 0; i < maxDisplayed; i++) {
                 Item it = inv.get(i);
                 renderer.drawString(lX, invY++, "- " + it.getName() + " (V:" + it.getValue() + ")", "\033[38;5;226m");
             }
-            
+
             if (inv.size() > 3) {
                 renderer.drawString(lX, invY, "...+" + (inv.size() - 2) + " more (Press I)", "\033[38;5;245m");
             }
         }
-        
-        int hudStartY = mapStartY + 20; 
-        
+
+        int hudStartY = mapStartY + 20;
+
         String patchStatus = hero.isFirewallPatchActive() ? "ACTIVE" : "NONE";
-        String stats = String.format(" HP: %d/%d | SECTOR: %d | SCORE: %d | PATCH: %s ", 
+        String stats = String.format(" HP: %d/%d | SECTOR: %d | SCORE: %d | PATCH: %s ",
             hero.getHp(), hero.getMaxHp(), (currentFloorIndex + 1), hero.getScore(), patchStatus);
-            
+
         renderer.drawString(0, hudStartY, "==============================================================================", "\033[38;5;255m");
-        
-        String hpColor = (hero.getHp() <= 25) ? "\033[38;5;196m" : "\033[38;5;11m"; 
-        renderer.drawString(2, hudStartY, stats, hpColor); 
-        
+
+        String hpColor = (hero.getHp() <= 25) ? "\033[38;5;196m" : "\033[38;5;11m";
+        renderer.drawString(2, hudStartY, stats, hpColor);
+
         int logY = hudStartY + 1;
         for (EventManager.EventLog log : eventManager.getRecentLogs()) {
             String logColor = switch (log.type) {
-                case DAMAGE -> "\033[38;5;196m"; 
-                case LOOT -> "\033[38;5;226m";   
-                case COMBAT -> "\033[38;5;208m"; 
-                case SYSTEM -> "\033[38;5;245m"; 
-                default -> "\033[38;5;255m";     
+                case DAMAGE -> "\033[38;5;196m";
+                case LOOT -> "\033[38;5;226m";
+                case COMBAT -> "\033[38;5;208m";
+                case SYSTEM -> "\033[38;5;245m";
+                default -> "\033[38;5;255m";
             };
             renderer.drawString(2, logY++, log.message, logColor);
         }
@@ -321,9 +394,15 @@ public class GameEngine {
     private void processInput(char command) {
         command = Character.toLowerCase(command);
 
-        // Help takes priority: Q closes the help screen instead of quitting.
         if (isHelpMenuOpen) {
             if (command == 'h' || command == 'q') isHelpMenuOpen = false;
+            return;
+        }
+
+        if (isVictorious) {
+            if (command == 'r') initializeNewRun();
+            if (command == 'l') handleLoad();
+            if (command == 'q') isRunning = false;
             return;
         }
 
@@ -337,7 +416,7 @@ public class GameEngine {
 
         if (isInventoryMenuOpen) {
             processInventoryInput(Character.toLowerCase(command));
-            return; 
+            return;
         }
 
         boolean actionTaken = false;
@@ -346,7 +425,7 @@ public class GameEngine {
             case 's' -> actionTaken = hero.move(0, 1, getCurrentMap(), eventManager);
             case 'a' -> actionTaken = hero.move(-1, 0, getCurrentMap(), eventManager);
             case 'd' -> actionTaken = hero.move(1, 0, getCurrentMap(), eventManager);
-            case 'e' -> attemptInteraction(); 
+            case 'e' -> attemptInteraction();
             case '1' -> { hero.sortInventory("name"); eventManager.publishEvent("Sorted inventory by Name.", EventManager.EventType.SYSTEM); }
             case '2' -> { hero.sortInventory("value"); eventManager.publishEvent("Sorted inventory by Value.", EventManager.EventType.SYSTEM); }
             case 'i' -> { isInventoryMenuOpen = true; inventoryPage = 0; }
@@ -357,7 +436,7 @@ public class GameEngine {
                 flashingEnabled = !flashingEnabled;
                 eventManager.publishEvent("Jumpscare flashes " + (flashingEnabled ? "ENABLED" : "DISABLED") + ".", EventManager.EventType.SYSTEM);
             }
-            case 'r' -> initializeNewRun(); 
+            case 'r' -> initializeNewRun();
             case 'q' -> isRunning = false;
         }
 
@@ -365,9 +444,9 @@ public class GameEngine {
             processMonsterTurns();
         }
     }
-    
+
     private void handleSave() {
-        if (FileManager.saveGame("savegame.txt", hero, floors, currentFloorIndex)) {
+        if (FileManager.saveGame(saveFilePath, hero, floors, currentFloorIndex)) {
             eventManager.publishEvent("Game state saved successfully.", EventManager.EventType.SYSTEM);
         } else {
             eventManager.publishEvent("ERROR: Failed to save game state.", EventManager.EventType.DAMAGE);
@@ -375,16 +454,21 @@ public class GameEngine {
     }
 
     private void handleLoad() {
-        FileManager.SaveState state = FileManager.loadGame("savegame.txt");
+        FileManager.SaveState state = FileManager.loadGame(saveFilePath);
         if (state != null) {
             this.hero = state.player;
             this.floors = state.floors;
             this.currentFloorIndex = state.currentFloorIndex;
+
+            // Clean load state constraints
             this.isInventoryMenuOpen = false;
             this.isHelpMenuOpen = false;
+            this.isVictorious = false;
+            this.deathMessagePublished = false;
+            this.jumpscareTriggered = false;
             this.inventoryPage = 0;
-            
-            // Recalculate FOV immediately so the screen isn't blank
+            this.eventManager.clear();
+
             getCurrentMap().calculateFOV(hero.getX(), hero.getY(), 6);
             if (hero.getHp() > 0) resumeMusicAfterDeath();
             eventManager.publishEvent("Game loaded successfully.", EventManager.EventType.SYSTEM);
@@ -392,16 +476,16 @@ public class GameEngine {
             eventManager.publishEvent("ERROR: No valid save found or data corrupted.", EventManager.EventType.DAMAGE);
         }
     }
-    
+
     private void processInventoryInput(char command) {
         if (command == 'i' || command == 'q') {
             isInventoryMenuOpen = false;
             return;
         }
-        
+
         List<Item> inv = hero.getInventory();
         int maxPages = Math.max(1, (int)Math.ceil(inv.size() / 5.0));
-        
+
         if (command == 'n') {
             inventoryPage = (inventoryPage + 1) % maxPages;
         } else if (command == 'p') {
@@ -414,11 +498,11 @@ public class GameEngine {
             }
         }
     }
-    
+
     private void useItem(int index) {
         Item item = hero.getInventory().get(index);
         String name = item.getName();
-        
+
         if (name.equals("Health Syringe")) {
             if (hero.getHp() < hero.getMaxHp()) {
                 hero.heal(5);
@@ -442,27 +526,28 @@ public class GameEngine {
             } else {
                 hero.takeDamage(10);
                 eventManager.publishEvent("Cache contained Malware! -10 HP.", EventManager.EventType.DAMAGE);
-                if (hero.getHp() <= 0) isInventoryMenuOpen = false; 
+                if (hero.getHp() <= 0) isInventoryMenuOpen = false;
             }
             hero.removeItem(item);
         } else if (name.equals("Data Fragment")) {
             eventManager.publishEvent("Data Fragment has no use action (Score already added).", EventManager.EventType.SYSTEM);
         }
-        
+
         int currentMaxPages = Math.max(1, (int)Math.ceil(hero.getInventory().size() / 5.0));
         if (inventoryPage >= currentMaxPages) {
-            inventoryPage = currentMaxPages - 1;
+            inventoryPage = Math.max(0, currentMaxPages - 1);
         }
     }
-    
+
     private void resumeMusicAfterDeath() {
         if (musicPausedForDeath) {
-            musicPlayer.resume();
+            if (!testMode) musicPlayer.resume();
             musicPausedForDeath = false;
         }
     }
 
-    private void processMonsterTurns() {
+    // Package-private so combat transitions can be verified headlessly with seeded maps.
+    void processMonsterTurns() {
         DungeonMap map = getCurrentMap();
         for (Monster m : map.getMonsters()) {
             if (hero.getHp() <= 0) break;
@@ -475,12 +560,16 @@ public class GameEngine {
                     hero.takeDamage(dmg);
                     eventManager.publishEvent(m.getName() + " corrupted you for " + dmg + " dmg!", EventManager.EventType.DAMAGE);
                     if (hero.getHp() <= 0) {
-                        // A monster delivered the killing blow. Trap/cache deaths never enter here.
-                        musicPlayer.stop();
-                        musicPausedForDeath = true;
-                        int columns = activeTerminal != null ? activeTerminal.getWidth() : 100;
-                        int rows = activeTerminal != null ? activeTerminal.getHeight() : 55;
-                        JumpscareManager.playJumpscare(flashingEnabled, columns, rows);
+                        if (!jumpscareTriggered) {
+                            musicPlayer.stop();
+                            musicPausedForDeath = true;
+                            if (!testMode) {
+                                int columns = activeTerminal != null ? activeTerminal.getWidth() : 100;
+                                int rows = activeTerminal != null ? activeTerminal.getHeight() : 55;
+                                JumpscareManager.playJumpscare(flashingEnabled, columns, rows);
+                            }
+                            jumpscareTriggered = true;
+                        }
                         break;
                     }
                 } else {
@@ -492,39 +581,64 @@ public class GameEngine {
 
     private void attemptInteraction() {
         char currentTile = getCurrentMap().getInteractableAt(hero.getX(), hero.getY());
-        
-        if (currentTile == 'M') { 
+
+        if (currentTile == 'M') {
             boolean bossAlive = getCurrentMap().getMonsters().stream().anyMatch(m -> m.getSymbol() == 'O');
             if (bossAlive) {
                 eventManager.publishEvent("ACCESS DENIED: System Overlord is still active!", EventManager.EventType.SYSTEM);
             } else {
-                System.out.print("\033[2J\033[H");
-                System.out.println("\033[38;5;46mMAINFRAME HACKED. MISSION ACCOMPLISHED!\033[0m");
-                hero.addScore(5000); 
-                System.out.println("Final Score: " + hero.getScore());
-                isRunning = false;
+                hero.addScore(5000);
+                eventManager.publishEvent("MAINFRAME HACKED. MISSION ACCOMPLISHED!", EventManager.EventType.SYSTEM);
+                isVictorious = true;
             }
-            
-        } else if (currentTile == '>') { 
+        } else if (currentTile == '>') {
             eventManager.publishEvent("Descending deeper into the subnet...", EventManager.EventType.SYSTEM);
             currentFloorIndex++;
-            
+
             if (currentFloorIndex >= floors.size()) {
                 floors.add(new DungeonMap(58, 19, true, currentFloorIndex));
             }
-            
+
             DungeonMap nextMap = getCurrentMap();
-            hero.setPosition(nextMap.getStartX(), nextMap.getStartY()); 
-            
-        } else if (currentTile == '<') { 
+            hero.setPosition(nextMap.getStartX(), nextMap.getStartY());
+
+        } else if (currentTile == '<') {
             if (currentFloorIndex > 0) {
                 eventManager.publishEvent("Returning to previous sector...", EventManager.EventType.SYSTEM);
                 currentFloorIndex--;
                 DungeonMap prevMap = getCurrentMap();
-                hero.setPosition(prevMap.getEndX(), prevMap.getEndY()); 
+                hero.setPosition(prevMap.getEndX(), prevMap.getEndY());
             }
         } else {
             eventManager.publishEvent("No valid port here to interact with.", EventManager.EventType.SYSTEM);
         }
+    }
+
+    // --- Package-private accessors for JUnit headless verification ---
+    // Tests may install a real generated map without changing the production game flow.
+    void setCurrentMapForTest(DungeonMap map) {
+        if (!testMode) throw new IllegalStateException("Only available in headless tests");
+        this.floors = new ArrayList<>();
+        this.floors.add(java.util.Objects.requireNonNull(map));
+        this.currentFloorIndex = 0;
+        this.hero.setPosition(map.getStartX(), map.getStartY());
+    }
+
+    DungeonMap getCurrentMapForTest() {
+        if (!testMode) throw new IllegalStateException("Only available in headless tests");
+        return getCurrentMap();
+    }
+
+    boolean wasJumpscareTriggered() { return jumpscareTriggered; }
+    boolean isDeathMessagePublished() { return deathMessagePublished; }
+    boolean isVictorious() { return isVictorious; }
+    boolean isInventoryMenuOpen() { return isInventoryMenuOpen; }
+    boolean isRunning() { return isRunning; }
+    Player getHero() { return hero; }
+    EventManager getEventManager() { return eventManager; }
+
+    void processTestInput(char command) {
+        processInput(command);
+        updateLogic();
     }
 }

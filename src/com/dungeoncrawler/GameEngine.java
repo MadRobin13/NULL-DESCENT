@@ -4,6 +4,7 @@ import com.dungeoncrawler.engine.FileManager;
 import com.dungeoncrawler.engine.TerminalRenderer;
 import com.dungeoncrawler.engine.EventManager;
 import com.dungeoncrawler.engine.MusicPlayer;
+import com.dungeoncrawler.engine.JumpscareManager;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 import org.jline.utils.NonBlockingReader;
@@ -24,6 +25,9 @@ public class GameEngine {
     
     private boolean isInventoryMenuOpen = false;
     private boolean isHelpMenuOpen = false;
+    private boolean flashingEnabled = true;
+    private boolean musicPausedForDeath = false;
+    private Terminal activeTerminal;
     private int inventoryPage = 0;
     
     private final String[] headerText = {
@@ -52,7 +56,7 @@ public class GameEngine {
         " Setting off into the network, you find a number of unlocked ports equal to the number of bins.",
         " Coincidence? I think NOT! You decide to enter each sector and see if you can find the Root Keys.",
         "",
-        " Controls: WASD Move | E Interact | I Inventory | H Help | K Save | L Load | Q Quit"
+        " Controls: WASD Move | E Interact | I Inventory | H Help | K Save | L Load | F Flashes | Q Quit"
     };
 
     public GameEngine() {
@@ -62,6 +66,7 @@ public class GameEngine {
         this.isRunning = true;
         
         this.musicPlayer.playLoop("bgm.wav");
+        JumpscareManager.initialize();
         
         initializeNewRun();
     }
@@ -77,12 +82,14 @@ public class GameEngine {
         DungeonMap startMap = new DungeonMap(58, 19, false, 0);
         this.floors.add(startMap);
         this.hero.setPosition(startMap.getStartX(), startMap.getStartY());
+        resumeMusicAfterDeath();
         
         eventManager.publishEvent("OS Booted. Infiltration begun.", EventManager.EventType.SYSTEM);
     }
 
     public void start() {
         try (Terminal terminal = TerminalBuilder.builder().jna(true).system(true).build()) {
+            this.activeTerminal = terminal;
             terminal.enterRawMode();
             NonBlockingReader reader = terminal.reader();
             
@@ -100,7 +107,8 @@ public class GameEngine {
         } catch (IOException e) {
             System.err.println("Terminal init failed: " + e.getMessage());
         } finally {
-            musicPlayer.stop();
+            activeTerminal = null;
+            musicPlayer.close();
             System.out.print("\033[2J\033[H"); 
             System.out.println("Connection terminated. Final Score: " + hero.getScore());
         }
@@ -227,7 +235,7 @@ public class GameEngine {
         renderer.drawString(rightColumn, mapStartY + 9, "Corrupted Cache: 50% +50 score", textColor);
         renderer.drawString(3, mapStartY + 10, "Q  Quit game (outside menus)", textColor);
         renderer.drawString(rightColumn, mapStartY + 10, "                 50% -10 HP", textColor);
-        renderer.drawString(3, mapStartY + 11, "H  Open / close this help screen", textColor);
+        renderer.drawString(3, mapStartY + 11, "H  Help | F  Toggle jumpscare flashes", textColor);
         renderer.drawString(rightColumn, mapStartY + 11, "Item value is for sorting, not money", textColor);
 
         renderer.drawString(3, mapStartY + 13, "INVENTORY", headingColor);
@@ -345,6 +353,10 @@ public class GameEngine {
             case 'h' -> isHelpMenuOpen = true;
             case 'k' -> handleSave();
             case 'l' -> handleLoad();
+            case 'f' -> {
+                flashingEnabled = !flashingEnabled;
+                eventManager.publishEvent("Jumpscare flashes " + (flashingEnabled ? "ENABLED" : "DISABLED") + ".", EventManager.EventType.SYSTEM);
+            }
             case 'r' -> initializeNewRun(); 
             case 'q' -> isRunning = false;
         }
@@ -374,6 +386,7 @@ public class GameEngine {
             
             // Recalculate FOV immediately so the screen isn't blank
             getCurrentMap().calculateFOV(hero.getX(), hero.getY(), 6);
+            if (hero.getHp() > 0) resumeMusicAfterDeath();
             eventManager.publishEvent("Game loaded successfully.", EventManager.EventType.SYSTEM);
         } else {
             eventManager.publishEvent("ERROR: No valid save found or data corrupted.", EventManager.EventType.DAMAGE);
@@ -442,18 +455,34 @@ public class GameEngine {
         }
     }
     
+    private void resumeMusicAfterDeath() {
+        if (musicPausedForDeath) {
+            musicPlayer.resume();
+            musicPausedForDeath = false;
+        }
+    }
+
     private void processMonsterTurns() {
         DungeonMap map = getCurrentMap();
         for (Monster m : map.getMonsters()) {
-            if (Math.random() > m.getSpeed()) continue; 
-            
+            if (hero.getHp() <= 0) break;
+            if (Math.random() > m.getSpeed()) continue;
+
             int distToHero = Math.abs(m.getX() - hero.getX()) + Math.abs(m.getY() - hero.getY());
-            
             if (distToHero <= 8) {
                 if (distToHero == 1) {
                     int dmg = m.getMinDmg() + (int)(Math.random() * (m.getMaxDmg() - m.getMinDmg() + 1));
                     hero.takeDamage(dmg);
                     eventManager.publishEvent(m.getName() + " corrupted you for " + dmg + " dmg!", EventManager.EventType.DAMAGE);
+                    if (hero.getHp() <= 0) {
+                        // A monster delivered the killing blow. Trap/cache deaths never enter here.
+                        musicPlayer.stop();
+                        musicPausedForDeath = true;
+                        int columns = activeTerminal != null ? activeTerminal.getWidth() : 100;
+                        int rows = activeTerminal != null ? activeTerminal.getHeight() : 55;
+                        JumpscareManager.playJumpscare(flashingEnabled, columns, rows);
+                        break;
+                    }
                 } else {
                     m.moveTowards(hero.getX(), hero.getY(), map);
                 }

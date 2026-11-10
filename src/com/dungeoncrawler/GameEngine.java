@@ -53,15 +53,15 @@ public class GameEngine {
         " You hear disturbing fan noises from the server that are slowly getting louder. You get the",
         " distinct impression that if those noises get too loud some very bad things will happen. Spooky.",
         "",
-        " Surrounding the gateway are a series of directories that look like quarantine bins for corrupted",
-        " files. There's a log scrawled on the terminal in an unknown hash: \"Root Keys...\" You remember",
-        " from your cybersecurity class that a Root Key is a piece of code sought by both the white hats",
-        " and black hats on the web: Admin Privileges, Master Passwords, Encryption Tokens. All Root Keys!",
-        " Perhaps if you were to collect all the Root Keys and place them in the quarantine bins the",
-        " breach would close? It's worth a shot!",
+        " Scanning the local directory, you find logs detailing the network's corruption. The system has",
+        " been completely overrun by malware, and a rogue entity known as the System Overlord has seized",
+        " control of the mainframe at the bottom of the subnet. You remember from your cybersecurity class",
+        " that the only way to take the network back is to fight through its defences, defeat the",
+        " System Overlord, and access the mainframe directly. Sounds simple enough!",
         "",
-        " Setting off into the network, you find a number of unlocked ports equal to the number of bins.",
-        " Coincidence? I think NOT! You decide to enter each sector and see if you can find the Root Keys.",
+        " Setting off into the network, you see a terminal port leading to the first of ten increasingly",
+        " dangerous sectors. You decide to descend through the network, sector by sector, and see if",
+        " you can reach the mainframe. Time to reboot this system.",
         "",
         " Controls: WASD Move | E Interact | I Inventory | H Help | K Save | L Load | F Flashes | Q Quit"
     };
@@ -346,7 +346,7 @@ public class GameEngine {
         renderer.drawString(3, mapStartY + 2, "CONTROLS", headingColor);
         renderer.drawString(rightColumn, mapStartY + 2, "ITEMS & PICKUPS", headingColor);
         renderer.drawString(3, mapStartY + 3, "W/A/S/D  Move; bump enemies to attack", textColor);
-        renderer.drawString(rightColumn, mapStartY + 3, "F  Firewall Patch: block next T trap", textColor);
+        renderer.drawString(rightColumn, mapStartY + 3, "F tile: Firewall Patch; activate in inventory", textColor);
         renderer.drawString(3, mapStartY + 4, "E  Use stairs or the mainframe", textColor);
         renderer.drawString(rightColumn, mapStartY + 4, "T  Firewall Trap: -35 HP", textColor);
         renderer.drawString(3, mapStartY + 5, "I  Open inventory (I/Q closes)", textColor);
